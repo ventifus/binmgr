@@ -7,14 +7,15 @@ import (
 	"context"
 	"time"
 
+	"github.com/k0kubun/pp/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/ventifus/binmgr/pkg/backend"
 )
 
 // uninstallCmd represents the uninstall command
-var updateCmd = &cobra.Command{
-	Use:   "update",
+var statusCmd = &cobra.Command{
+	Use:   "status",
 	Short: "A brief description of your command",
 	Long: `A longer description that spans multiple lines and likely contains examples
 and usage of using your command. For example:
@@ -22,37 +23,30 @@ and usage of using your command. For example:
 Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
-	RunE: update,
+	RunE: status,
 }
 
-func update(cmd *cobra.Command, args []string) error {
+func status(cmd *cobra.Command, args []string) error {
 	// log := log.WithField("command", "list")
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
 	defer cancel()
-	if len(args) == 0 {
-		return updateAll(ctx)
-	}
-	return nil
-}
-
-func updateAll(ctx context.Context) error {
 	manifests, err := backend.GetAllManifests()
 	if err != nil {
 		return err
 	}
-	// w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0x0)
-	// defer w.Flush()
+	if loglevel == "debug" {
+		pp.Println(manifests)
+	}
 	for _, m := range manifests {
 		if m.Type == "github" {
-			err = backend.UpdateGithub(ctx, m)
-			if err != nil {
-				return err
-			}
+			backend.GithubStatus(ctx, m)
+		} else if m.Type == "shasumurl" {
+			backend.ShasumUrlStatus(ctx, m)
 		}
 	}
 	return nil
 }
 
 func init() {
-	rootCmd.AddCommand(updateCmd)
+	rootCmd.AddCommand(statusCmd)
 }

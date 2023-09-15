@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/apex/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var cfgFile string
+var loglevel string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -58,14 +60,18 @@ func init() {
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.binmgr.yaml)")
+	rootCmd.PersistentFlags().StringVar(&loglevel, "loglevel", "info", "Log level")
+	//loglevel := cmd.Flag("loglevel").Value.String()
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	log.WithField("level", loglevel).Debug("setting log level")
+	log.SetLevelFromString(loglevel)
 	if cfgFile != "" {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)

@@ -1,40 +1,61 @@
 /*
 Copyright © 2023 NAME HERE <EMAIL ADDRESS>
-
 */
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/ventifus/binmgr/pkg/backend"
+	"golang.org/x/exp/slices"
 )
 
 // installCmd represents the install command
 var installCmd = &cobra.Command{
-	Use:   "install",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+	Use:   "install [URL...]",
+	Short: "Installs a package",
+	Long:  `Installs packages found at one or more URLs.`,
+	Args:  validate,
+	RunE:  install,
+}
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("install called")
-	},
+func getPackageTypes() []string {
+	return []string{"github", "tarball", "shasumurl"}
+}
+
+func validate(cmd *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	if val := cmd.Flag("type").Value.String(); !slices.Contains(getPackageTypes(), val) {
+		return fmt.Errorf("unsupported type %s", val)
+	}
+	return nil
+}
+
+func install(cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
+	defer cancel()
+	fileGlob := cmd.Flag("file").Value.String()
+	outFile := cmd.Flag("outfile").Value.String()
+	remoteType := cmd.Flag("type").Value.String()
+
+	if remoteType == "github" {
+		return backend.InstallGithub(ctx, args[0], fileGlob, outFile)
+	} else if remoteType == "shasumurl" {
+		return backend.InstallShasumUrl(ctx, args[0], fileGlob, outFile)
+	}
+	return fmt.Errorf("unsupported type")
 }
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// installCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// installCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	installCmd.Flags().String("type", "github", "Type of package")
+	installCmd.Flags().String("file", "", "If there are multiple files, select file name to install")
+	installCmd.MarkFlagRequired("file")
+	installCmd.Flags().String("outfile", "", "The local file name")
+	installCmd.Flags().String("xform", "", "Transform file names with regex")
 }
