@@ -5,9 +5,9 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"time"
 
+	"github.com/go-errors/errors"
 	"github.com/spf13/cobra"
 	"github.com/ventifus/binmgr/pkg/backend"
 	"golang.org/x/exp/slices"
@@ -31,7 +31,7 @@ func validate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if val := cmd.Flag("type").Value.String(); !slices.Contains(getPackageTypes(), val) {
-		return fmt.Errorf("unsupported type %s", val)
+		return errors.Errorf("unsupported type %s", val)
 	}
 	return nil
 }
@@ -48,7 +48,7 @@ func install(cmd *cobra.Command, args []string) error {
 	} else if remoteType == "shasumurl" {
 		return backend.InstallShasumUrl(ctx, args[0], fileGlob, outFile)
 	}
-	return fmt.Errorf("unsupported type")
+	return errors.Errorf("unsupported type")
 }
 
 func init() {

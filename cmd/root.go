@@ -60,7 +60,7 @@ func init() {
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.binmgr.yaml)")
-	rootCmd.PersistentFlags().StringVar(&loglevel, "loglevel", "info", "Log level")
+	rootCmd.PersistentFlags().StringVar(&loglevel, "loglevel", "warn", "Log level")
 	//loglevel := cmd.Flag("loglevel").Value.String()
 
 	// Cobra also supports local flags, which will only run

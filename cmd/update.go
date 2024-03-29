@@ -5,8 +5,10 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/apex/log"
 	"github.com/spf13/cobra"
 
 	"github.com/ventifus/binmgr/pkg/backend"
@@ -32,6 +34,31 @@ func update(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return updateAll(ctx)
 	}
+	manifests, err := backend.GetAllManifests()
+	if err != nil {
+		return err
+	}
+	for _, pkg := range args {
+		for _, m := range manifests {
+			if m.Name == pkg {
+				err = updatePackage(ctx, m)
+				if err != nil {
+					log.WithError(err).Debug("update package failed")
+					fmt.Printf("Error: %v", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func updatePackage(ctx context.Context, m *backend.BinmgrManifest) error {
+	if m.Type == "github" {
+		return backend.UpdateGithub(ctx, m)
+
+	} else if m.Type == "shasumurl" {
+		return backend.UpdateShasumUrl(ctx, m)
+	}
 	return nil
 }
 
@@ -43,11 +70,10 @@ func updateAll(ctx context.Context) error {
 	// w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0x0)
 	// defer w.Flush()
 	for _, m := range manifests {
-		if m.Type == "github" {
-			err = backend.UpdateGithub(ctx, m)
-			if err != nil {
-				return err
-			}
+		err = updatePackage(ctx, m)
+		if err != nil {
+			log.WithError(err).Debug("update package failed")
+			fmt.Printf("Error: %v", err)
 		}
 	}
 	return nil

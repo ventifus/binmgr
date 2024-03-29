@@ -75,7 +75,7 @@ func (m BinmgrManifest) SaveManifest() error {
 	log = log.WithField("path", fPath)
 	f, err := os.Create(fPath)
 	if err != nil {
-		log.WithError(err).Error("failed to create file")
+		log.WithError(err).Error(createFailed)
 		return err
 	}
 	defer f.Close()

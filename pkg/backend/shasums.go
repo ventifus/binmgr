@@ -5,13 +5,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/apex/log"
+	"github.com/go-errors/errors"
 )
 
 type ChecksumEntry struct {
@@ -43,14 +43,16 @@ func GetChecksumUrl(client *http.Client, url string) ([]ChecksumEntry, error) {
 	defer resp.Body.Close()
 	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get checksum file")
 	if resp.StatusCode != 200 {
-		return csums, fmt.Errorf("%s", resp.Status)
+		return csums, errors.Errorf("%s", resp.Status)
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		sections := strings.SplitN(scanner.Text(), " ", 2)
+		filename := strings.TrimSpace(sections[1])
+		filename = strings.TrimPrefix(filename, "*") // Found one sha256sums.txt where filenames all begain with '*'
 		csums = append(csums, ChecksumEntry{
 			Sum:  strings.TrimSpace(sections[0]),
-			Name: strings.TrimSpace(sections[1]),
+			Name: filename,
 		})
 	}
 	return csums, nil
@@ -69,18 +71,18 @@ func GetSumForFile(client *http.Client, url string, file string) (string, error)
 	defer resp.Body.Close()
 	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Info("get checksum file")
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s", resp.Status)
+		return "", errors.Errorf("%s", resp.Status)
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		sections := strings.SplitN(scanner.Text(), " ", 2)
 		sections[0] = strings.TrimSpace(sections[0])
-		sections[1] = strings.TrimSpace(sections[1])
+		sections[1] = strings.TrimPrefix(strings.TrimSpace(sections[1]), "*")
 		if sections[1] == file {
 			return sections[0], nil
 		}
 	}
-	return "", fmt.Errorf("no checksum found for file: %s", file)
+	return "", errors.Errorf("no checksum found for file: %s", file)
 }
 
 func VerifyBytes(b []byte, checksum string) error {
@@ -95,7 +97,7 @@ func VerifyBytes(b []byte, checksum string) error {
 	h := hex.EncodeToString(csum.Sum(nil))
 	log.Debugf("computed checksum: \"%s\"", h)
 	if h != checksum {
-		return fmt.Errorf("checksum does not match")
+		return errors.Errorf("checksum does not match")
 	}
 	return nil
 }

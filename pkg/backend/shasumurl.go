@@ -33,8 +33,8 @@ func InstallShasumUrl(ctx context.Context, u string, fileGlob string, outFile st
 	}
 	m.Name = uu.String()
 	m.ManifestFileName = fmt.Sprintf("shasumurl_%s", strings.ReplaceAll(uu.String(), "/", "_"))
-
 	m.LatestRemoteUrl = uu.String()
+
 	for _, f := range csums {
 		t, err := filepath.Match(fileGlob, f.Name)
 		if err != nil {
@@ -48,6 +48,7 @@ func InstallShasumUrl(ctx context.Context, u string, fileGlob string, outFile st
 			}
 
 			a.RemoteFile = uu.ResolveReference(uRel).String()
+			a.FromGlob = fileGlob
 			m.Artifacts = append(m.Artifacts, a)
 			fmt.Printf("Installing %s from %s\n", path.Base(outFile), a.RemoteFile)
 
@@ -68,7 +69,62 @@ func InstallShasumUrl(ctx context.Context, u string, fileGlob string, outFile st
 	return m.SaveManifest()
 }
 
-// func UpdateShasumUrl(ctx context.Context, m *BinmgrManifest) error {
+func UpdateShasumUrl(ctx context.Context, m *BinmgrManifest) error {
+	csums, err := GetChecksumUrl(nil, m.LatestRemoteUrl)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Package %s\n", m.Name)
+	updates := false
+	for _, a := range m.Artifacts {
+		for _, c := range csums {
+			t, err := path.Match(a.FromGlob, c.Name)
+			if err != nil {
+				return err
+			}
+			if t {
+				uu, err := url.Parse(m.LatestRemoteUrl)
+				if err != nil {
+					return err
+				}
+				uRel, err := url.Parse(c.Name)
+				if err != nil {
+					return err
+				}
+				remoteFile := uu.ResolveReference(uRel).String()
+				if a.RemoteFile != remoteFile {
+					updates = true
+					fmt.Printf("  upgrade %s -> %s\n", path.Base(a.RemoteFile), path.Base(remoteFile))
+					a.RemoteFile = remoteFile
+					file, err := DownloadFile(ctx, nil, a)
+					if err != nil {
+						log.WithError(err).Error("failed to read response data")
+						return err
+					}
+					for _, ia := range a.InnerArtifacts {
+						fmt.Printf("    - %s\n", ia.LocalFile)
+						err = InstallFile(a, file, ia.LocalFile)
+						if err != nil {
+							return err
+						}
+					}
+					if a.LocalFile != "" {
+						fmt.Printf("    - %s\n", a.LocalFile)
+						err = InstallFile(a, file, a.LocalFile)
+						if err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	if updates {
+		return m.SaveManifest()
+	}
+	fmt.Println("  no update needed")
+	return nil
+}
 
 func ShasumUrlStatus(ctx context.Context, m *BinmgrManifest) error {
 	csums, err := GetChecksumUrl(nil, m.LatestRemoteUrl)

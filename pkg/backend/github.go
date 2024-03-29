@@ -7,9 +7,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/apex/log"
+	"github.com/go-errors/errors"
 	"github.com/google/go-github/v55/github"
 )
 
@@ -31,7 +33,7 @@ type GithubRepo struct {
 }
 
 func InstallGithub(ctx context.Context, u string, fileGlob string, outFile string) error {
-	if strings.HasPrefix(u, "github.com") {
+	if !strings.Contains(u, "://") {
 		u = fmt.Sprintf("https://%s", u)
 	}
 	githubUrl, err := url.Parse(u)
@@ -47,7 +49,7 @@ func InstallGithub(ctx context.Context, u string, fileGlob string, outFile strin
 	}
 
 	gh := NewGithubRepo(owner, repo)
-	err = gh.GetLatestRelease(ctx)
+	err = gh.GetRelease(ctx, githubPath)
 	if err != nil {
 		return err
 	}
@@ -74,6 +76,8 @@ func InstallGithub(ctx context.Context, u string, fileGlob string, outFile strin
 			return err
 		}
 
+		fmt.Printf("Installing %s from %s\n", path.Base(outFile), artifact.RemoteFile)
+
 		err = InstallFile(artifact, f, outFile)
 		if err != nil {
 			return err
@@ -84,29 +88,26 @@ func InstallGithub(ctx context.Context, u string, fileGlob string, outFile strin
 
 func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 	log := log.WithField("manifest", m.Name)
-	fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
+	currentVersion := m.CurrentVersion
+	fmt.Printf("Package %s %s\n", m.Name, currentVersion)
 	repo := NewGithubRepoFromManifest(m)
-	err := repo.GetLatestRelease(ctx)
+	err := repo.GetRelease(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if m.CurrentVersion == repo.Manifest.CurrentVersion {
+	if currentVersion == repo.Manifest.CurrentVersion {
 		log.WithField("version", repo.Manifest.CurrentVersion).Debug("no update found")
 		fmt.Println("  no update needed")
 		return nil
 	}
-	fmt.Printf("  upgrade %s -> %s\n", m.CurrentVersion, repo.Manifest.CurrentVersion)
-	repo.Manifest.Artifacts = m.Artifacts
-
+	fmt.Printf("  upgrade %s -> %s\n", currentVersion, repo.Manifest.CurrentVersion)
 	log.WithField("manifest", repo.Manifest.String()).Info("received manifest")
 	updates := false
 	for i, artifact := range repo.Manifest.Artifacts {
-		if !artifact.Installed {
-			continue
-		}
 		newArtifact, err := repo.UpdateArtifact(artifact)
-		newArtifact.LocalFile = artifact.RemoteFile
+		newArtifact.LocalFile = artifact.LocalFile
 		newArtifact.InnerArtifacts = artifact.InnerArtifacts
+		newArtifact.Installed = artifact.Installed
 		if err != nil {
 			log.WithError(err).Error("failed to update artifact")
 			continue
@@ -116,15 +117,6 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 			continue
 		}
 		repo.Manifest.Artifacts[i] = newArtifact
-		err = VerifyLocalFile(newArtifact)
-		if err == nil {
-			log.Infof("local file exists and matches checksum; nothing to do")
-			fmt.Printf("  - %s no update needed\n", newArtifact.LocalFile)
-			newArtifact.Installed = true
-			continue
-		} else if !os.IsNotExist(err) {
-			return err
-		}
 
 		f, err := DownloadFile(ctx, nil, newArtifact)
 		if err != nil {
@@ -132,12 +124,23 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 			return err
 		}
 
-		err = InstallFile(newArtifact, f, newArtifact.LocalFile)
-		if err != nil {
-			return err
+		if newArtifact.Installed {
+			err = InstallFile(newArtifact, f, newArtifact.LocalFile)
+			if err != nil {
+				return err
+			}
+			updates = true
+		} else {
+			for _, ia := range newArtifact.InnerArtifacts {
+				if ia.Installed {
+					err = InstallFile(newArtifact, f, ia.LocalFile)
+					if err != nil {
+						return err
+					}
+					updates = true
+				}
+			}
 		}
-		updates = true
-		newArtifact.Installed = true
 	}
 	if updates {
 		return repo.Manifest.SaveManifest()
@@ -147,18 +150,21 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 
 func GithubStatus(ctx context.Context, m *BinmgrManifest) error {
 	log := log.WithField("manifest", m.Name)
-	fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
+	currentVersion := m.CurrentVersion
+	fmt.Printf("Package %s %s\n", m.Name, currentVersion)
 	repo := NewGithubRepoFromManifest(m)
-	err := repo.GetLatestRelease(ctx)
+	err := repo.GetRelease(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if m.CurrentVersion == repo.Manifest.CurrentVersion {
+	if currentVersion == repo.Manifest.CurrentVersion {
 		log.WithField("version", repo.Manifest.CurrentVersion).Debug("no update found")
 		fmt.Println("  no update needed")
+		// pp.Println(m)
+		// pp.Println(repo.Manifest)
 		return nil
 	}
-	fmt.Printf("  upgrade %s -> %s\n", m.CurrentVersion, repo.Manifest.CurrentVersion)
+	fmt.Printf("  upgrade %s -> %s\n", currentVersion, repo.Manifest.CurrentVersion)
 	return nil
 }
 
@@ -172,18 +178,23 @@ func getAssetByGlobOrPartial(release *github.RepositoryRelease, nameGlob string)
 			return asset, nil
 		}
 	}
-	return nil, fmt.Errorf("no matching asset found")
+	return nil, errors.Errorf("no matching asset found")
 }
 
 func findShaSums(release *github.RepositoryRelease) []*github.ReleaseAsset {
 	shasums := make([]*github.ReleaseAsset, 0)
 	for _, asset := range release.Assets {
 		assetName := asset.GetName()
-		if (strings.Contains(assetName, "sha") &&
-			strings.Contains(assetName, "sum")) ||
-			strings.Contains(assetName, "checksum") {
-			shasums = append(shasums, asset)
+		if !strings.HasSuffix(assetName, ".pem") && !strings.HasSuffix(assetName, ".sig") {
+			if (strings.Contains(assetName, "sha") && strings.Contains(assetName, "sum")) ||
+				strings.Contains(assetName, "checksum") {
+				log.WithField("url", *asset.BrowserDownloadURL).Debug("using checksum file")
+				shasums = append(shasums, asset)
+			}
 		}
+	}
+	if len(shasums) == 0 {
+		log.Debug("no checksums selected")
 	}
 	return shasums
 }
@@ -218,14 +229,33 @@ func NewGithubRepoFromManifest(manifest *BinmgrManifest) *GithubRepo {
 	return &r
 }
 
-func (g *GithubRepo) GetLatestRelease(ctx context.Context) error {
-	log := g.log.WithField("manifest", g.Manifest.Name)
-	release, resp, err := g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
+func (g *GithubRepo) GetRelease(ctx context.Context, u []string) error {
+	log := g.log.WithField("manifest", g.Manifest.Name).WithField("url", u)
+	var release *github.RepositoryRelease
+	var resp *github.Response
+	var err error
+	if len(u) < 4 {
+		log.WithField("release", "latest").Debug("getting latest release")
+		release, resp, err = g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
+	} else if u[4] == "tag" {
+		log.WithField("release", u[5]).Debug("getting release tag")
+		release, resp, err = g.client.Repositories.GetReleaseByTag(ctx, g.owner, g.repo, u[5])
+	} else if u[4] == "id" {
+		var rel int64
+		rel, err = strconv.ParseInt(u[5], 10, 64)
+		if err != nil {
+			return err
+		}
+		log.WithField("release", rel).Debug("getting release id")
+		release, resp, err = g.client.Repositories.GetRelease(ctx, g.owner, g.repo, rel)
+	} else {
+		log.WithField("u[3]", u[4]).Error("unsupported release type")
+	}
 	if err != nil {
 		return err
 	} else if resp.StatusCode != 200 {
 		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Error("failed to get github release")
-		return fmt.Errorf("github.com/%s/%s: %s", g.owner, g.repo, resp.Status)
+		return errors.Errorf("github.com/%s/%s: %s", g.owner, g.repo, resp.Status)
 	}
 	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get github release")
 	g.release = release
@@ -263,10 +293,10 @@ func (g *GithubRepo) SelectAssetByGlob(glob string) error {
 		return err
 	}
 	artifact, err := g.newArtifactFromAsset(asset)
-	artifact.FromGlob = glob
 	if err != nil {
 		return err
 	}
+	artifact.FromGlob = glob
 	g.Manifest.Artifacts = append(g.Manifest.Artifacts, artifact)
 	return nil
 }
@@ -293,7 +323,7 @@ func GetGithubManifest(ctx context.Context, owner string, repo string, remoteNam
 	}
 	if resp.StatusCode != 200 {
 		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Errorf("failed to get github release")
-		return nil, fmt.Errorf("github.com/%s/%s: %s", owner, repo, resp.Status)
+		return nil, errors.Errorf("github.com/%s/%s: %s", owner, repo, resp.Status)
 	} else {
 		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get github release")
 	}
@@ -359,5 +389,5 @@ func GetGithubManifest(ctx context.Context, owner string, repo string, remoteNam
 // 			Checksums: checksums,
 // 		}, nil
 // 	}
-// 	return nil, fmt.Errorf("asset %s not found", file)
+// 	return nil, errors.Errorf("asset %s not found", file)
 // }
