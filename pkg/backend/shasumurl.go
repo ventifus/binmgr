@@ -54,9 +54,6 @@ func InstallShasumUrl(ctx context.Context, u string, fileGlob string, outFile st
 
 			file, err := DownloadFile(ctx, nil, a)
 			if err != nil {
-				return err
-			}
-			if err != nil {
 				log.WithError(err).Error("failed to read response data")
 				return err
 			}

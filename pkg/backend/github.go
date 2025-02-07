@@ -69,9 +69,6 @@ func InstallGithub(ctx context.Context, u string, fileGlob string, outFile strin
 
 		f, err := DownloadFile(ctx, nil, artifact)
 		if err != nil {
-			return err
-		}
-		if err != nil {
 			log.WithError(err).Error("failed to read response data")
 			return err
 		}
