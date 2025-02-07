@@ -16,8 +16,8 @@ import (
 // installCmd represents the install command
 var installCmd = &cobra.Command{
 	Use:   "install [URL...]",
-	Short: "Installs a package",
-	Long:  `Installs packages found at one or more URLs.`,
+	Short: "Installs a binary",
+	Long:  `Installs binaries found at one or more URLs.`,
 	Args:  validate,
 	RunE:  install,
 }
