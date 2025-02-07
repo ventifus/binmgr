@@ -104,14 +104,15 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 	log.WithField("manifest", repo.Manifest.String()).Info("received manifest")
 	updates := false
 	for i, artifact := range repo.Manifest.Artifacts {
+		log.WithField("artifact", artifact).Debug("processing artifact")
 		newArtifact, err := repo.UpdateArtifact(artifact)
-		newArtifact.LocalFile = artifact.LocalFile
-		newArtifact.InnerArtifacts = artifact.InnerArtifacts
-		newArtifact.Installed = artifact.Installed
 		if err != nil {
 			log.WithError(err).Error("failed to update artifact")
 			continue
 		}
+		newArtifact.LocalFile = artifact.LocalFile
+		newArtifact.InnerArtifacts = artifact.InnerArtifacts
+		newArtifact.Installed = artifact.Installed
 		if newArtifact.RemoteFile == artifact.RemoteFile {
 			log.Debug("no update needed")
 			continue
@@ -178,7 +179,7 @@ func getAssetByGlobOrPartial(release *github.RepositoryRelease, nameGlob string)
 			return asset, nil
 		}
 	}
-	return nil, errors.Errorf("no matching asset found")
+	return nil, errors.Errorf("asset found matching %s", nameGlob)
 }
 
 func findShaSums(release *github.RepositoryRelease) []*github.ReleaseAsset {
