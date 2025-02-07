@@ -14,6 +14,7 @@ import (
 	"github.com/apex/log"
 	"github.com/go-errors/errors"
 	"github.com/h2non/filetype"
+	"github.com/schollz/progressbar/v3"
 )
 
 const (
@@ -181,13 +182,20 @@ func DownloadFile(ctx context.Context, client *http.Client, artifact *Artifact) 
 		return nil, err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != 200 {
 		return nil, errors.Errorf("%s", resp.Status)
 	}
-	file, err := io.ReadAll(resp.Body)
+
+	bar := progressbar.DefaultBytes(resp.ContentLength, "downloading")
+	file := new(bytes.Buffer)
+	file_io := io.MultiWriter(bar, file)
+	io.Copy(file_io, resp.Body)
+
+	//file, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.WithError(err).Error("failed to read response body")
 		return nil, err
 	}
-	return file, nil
+	return file.Bytes(), nil
 }
