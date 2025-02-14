@@ -53,6 +53,8 @@ func updatePackage(ctx context.Context, m *backend.BinmgrManifest) error {
 
 	} else if m.Type == "shasumurl" {
 		return backend.UpdateShasumUrl(ctx, m)
+	} else if m.Type == "kubeurl" {
+		return backend.UpdateKubeUrl(ctx, m)
 	}
 	return nil
 }

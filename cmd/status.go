@@ -37,6 +37,8 @@ func status(cmd *cobra.Command, args []string) error {
 			backend.GithubStatus(ctx, m)
 		} else if m.Type == "shasumurl" {
 			backend.ShasumUrlStatus(ctx, m)
+		} else if m.Type == "kubeurl" {
+			backend.KubeUrlStatus(ctx, m)
 		}
 	}
 	return nil

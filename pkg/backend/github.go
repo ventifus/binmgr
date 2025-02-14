@@ -32,13 +32,9 @@ type GithubRepo struct {
 	checksumfiles []*github.ReleaseAsset
 }
 
-func InstallGithub(ctx context.Context, u string, fileGlob string, outFile string) error {
-	if !strings.Contains(u, "://") {
-		u = fmt.Sprintf("https://%s", u)
-	}
-	githubUrl, err := url.Parse(u)
-	if err != nil {
-		return err
+func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, outFile string) error {
+	if githubUrl.Host != "github.com" {
+		return fmt.Errorf("this type is only valid for github.com")
 	}
 	githubPath := strings.Split(githubUrl.Path, "/")
 	owner := githubPath[1]
@@ -49,7 +45,7 @@ func InstallGithub(ctx context.Context, u string, fileGlob string, outFile strin
 	}
 
 	gh := NewGithubRepo(owner, repo)
-	err = gh.GetRelease(ctx, githubPath)
+	err := gh.GetRelease(ctx, githubPath)
 	if err != nil {
 		return err
 	}
