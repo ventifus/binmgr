@@ -102,7 +102,7 @@ func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
 		return err
 	}
 	updates := false
-	fmt.Printf("Package %s\n", m.Name)
+	fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
 	if m.CurrentVersion != kubeVersion {
 		updates = true
 		for _, a := range m.Artifacts {
