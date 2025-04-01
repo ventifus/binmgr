@@ -130,7 +130,7 @@ func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
 				return err
 			}
 			fmt.Printf("    - %s\n", a.LocalFile)
-			err = InstallFile(a, file, a.LocalFile)
+			err = InstallFile(a, file, a.LocalFile, a.FromGlob)
 			if err != nil {
 				return err
 			}

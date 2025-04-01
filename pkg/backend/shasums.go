@@ -59,7 +59,7 @@ func GetChecksumUrl(client *http.Client, url string) ([]ChecksumEntry, error) {
 }
 
 func GetSumForFile(client *http.Client, url string, file string) (string, error) {
-	log := log.WithField("f", "GetSumForFile").WithField("url", url).WithField("file", file)
+	l := log.WithField("f", "GetSumForFile").WithField("url", url).WithField("file", file)
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -69,7 +69,7 @@ func GetSumForFile(client *http.Client, url string, file string) (string, error)
 		return "", err
 	}
 	defer resp.Body.Close()
-	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Info("get checksum file")
+	l.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Info("get checksum file")
 	if resp.StatusCode != 200 {
 		return "", errors.Errorf("%s", resp.Status)
 	}
@@ -77,10 +77,15 @@ func GetSumForFile(client *http.Client, url string, file string) (string, error)
 	for scanner.Scan() {
 		sections := strings.SplitN(scanner.Text(), " ", 2)
 		sections[0] = strings.TrimSpace(sections[0])
-		sections[1] = strings.TrimPrefix(strings.TrimSpace(sections[1]), "*")
-		if sections[1] == file {
+		filename := sections[1]
+		filename = strings.TrimSpace(filename)
+		filename = strings.TrimPrefix(filename, "*")
+		filename = strings.TrimPrefix(filename, "./")
+		l.WithFields(log.Fields{"from": sections[1], "to": filename}).Debug("transformed file name")
+		if filename == file {
 			return sections[0], nil
 		}
+		l.WithField("filename", filename).Debug("skipping file")
 	}
 	return "", errors.Errorf("no checksum found for file: %s", file)
 }
