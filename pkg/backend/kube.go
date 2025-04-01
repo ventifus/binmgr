@@ -105,6 +105,8 @@ func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
 	fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
 	if m.CurrentVersion != kubeVersion {
 		updates = true
+		m.CurrentVersion = kubeVersion
+		m.LatestRemoteUrl = kubeVersionUrl
 		for _, a := range m.Artifacts {
 			u, err := url.Parse(a.RemoteFile)
 			if err != nil {
