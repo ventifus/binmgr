@@ -55,7 +55,7 @@ func InstallShasumUrl(ctx context.Context, u *url.URL, fileGlob string, outFile 
 				log.WithError(err).Error("failed to read response data")
 				return err
 			}
-			err = InstallFile(a, file, outFile)
+			err = InstallFile(a, file, outFile, a.FromGlob)
 			if err != nil {
 				return err
 			}
@@ -98,14 +98,14 @@ func UpdateShasumUrl(ctx context.Context, m *BinmgrManifest) error {
 					}
 					for _, ia := range a.InnerArtifacts {
 						fmt.Printf("    - %s\n", ia.LocalFile)
-						err = InstallFile(a, file, ia.LocalFile)
+						err = InstallFile(a, file, ia.LocalFile, a.FromGlob)
 						if err != nil {
 							return err
 						}
 					}
 					if a.LocalFile != "" {
 						fmt.Printf("    - %s\n", a.LocalFile)
-						err = InstallFile(a, file, a.LocalFile)
+						err = InstallFile(a, file, a.LocalFile, a.FromGlob)
 						if err != nil {
 							return err
 						}

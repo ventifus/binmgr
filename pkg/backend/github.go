@@ -71,7 +71,7 @@ func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, out
 
 		fmt.Printf("Installing %s from %s\n", path.Base(outFile), artifact.RemoteFile)
 
-		err = InstallFile(artifact, f, outFile)
+		err = InstallFile(artifact, f, outFile, artifact.FromGlob)
 		if err != nil {
 			return err
 		}
@@ -119,7 +119,7 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 		}
 
 		if newArtifact.Installed {
-			err = InstallFile(newArtifact, f, newArtifact.LocalFile)
+			err = InstallFile(newArtifact, f, newArtifact.LocalFile, newArtifact.FromGlob)
 			if err != nil {
 				return err
 			}
@@ -127,7 +127,7 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 		} else {
 			for _, ia := range newArtifact.InnerArtifacts {
 				if ia.Installed {
-					err = InstallFile(newArtifact, f, ia.LocalFile)
+					err = InstallFile(newArtifact, f, ia.LocalFile, ia.FromGlob)
 					if err != nil {
 						return err
 					}

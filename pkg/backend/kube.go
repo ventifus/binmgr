@@ -88,7 +88,7 @@ func InstallKubeFile(ctx context.Context, u *url.URL, fileGlob string, outFile s
 		log.WithError(err).Errorf("failed to download file")
 		return err
 	}
-	err = InstallFile(a, file, outFile)
+	err = InstallFile(a, file, outFile, a.FromGlob)
 	if err != nil {
 		return err
 	}
