@@ -40,16 +40,26 @@ func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, out
 	owner := githubPath[1]
 	repo := githubPath[2]
 
+	if outFile == "" {
+		outFile = path.Join(os.Getenv("HOME"), ".local/bin") + "/"
+		log.Debugf("outFile not specified, setting to %s", outFile)
+	}
 	if !path.IsAbs(outFile) {
 		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", outFile)
+		log.Debugf("outFile set to path %s", outFile)
 	}
+	log.WithField("outFile", outFile).Debug("outfile")
 
 	gh := NewGithubRepo(owner, repo)
 	err := gh.GetRelease(ctx, githubPath)
 	if err != nil {
 		return err
 	}
-	err = gh.SelectAssetByGlob(fileGlob)
+	fileGlob = strings.ReplaceAll(fileGlob, "${VERSION}", gh.Manifest.CurrentVersion)
+
+	globs := strings.Split(fileGlob, "!")
+
+	err = gh.SelectAssetByGlob(globs[0])
 	if err != nil {
 		return err
 	}
@@ -69,9 +79,9 @@ func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, out
 			return err
 		}
 
-		fmt.Printf("Installing %s from %s\n", path.Base(outFile), artifact.RemoteFile)
+		fmt.Printf("Installing from %s\n", artifact.RemoteFile)
 
-		err = InstallFile(artifact, f, outFile, artifact.FromGlob)
+		err = InstallFile(artifact, f, outFile, strings.Join(globs[1:], "!"))
 		if err != nil {
 			return err
 		}

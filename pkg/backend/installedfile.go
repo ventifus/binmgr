@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/apex/log"
 	"github.com/go-errors/errors"
@@ -24,8 +25,11 @@ const (
 	chmodFailed  = "failed to set file mode"
 )
 
-func InstallFile(artifact *Artifact, file []byte, localFile string, innerGlob string) error {
-	l := log.WithField("localfile", localFile)
+func InstallFile(artifact *Artifact, file []byte, localFile string, globs string) error {
+	globList := strings.Split(globs, "!")
+	globIndex := 0
+
+	l := log.WithField("localfile", localFile).WithField("globs", globList)
 	for _, c := range artifact.Checksums {
 		err := VerifyBytes(file, c)
 		if err != nil {
@@ -88,6 +92,8 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, innerGlob st
 	}
 	if kind.MIME.Value == "application/x-tar" {
 		l.Debug("extracting tar")
+		currentGlob := globList[globIndex]
+		globIndex++
 		tr := tar.NewReader(bytes.NewReader(file))
 		for {
 			hdr, err := tr.Next()
@@ -100,7 +106,8 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, innerGlob st
 			}
 			l.Debugf("tar file: %s", hdr.Name)
 
-			match, err := path.Match(innerGlob, hdr.Name)
+			match, err := path.Match(currentGlob, hdr.Name)
+
 			if err != nil {
 				l.WithError(err).Error("malformed pattern")
 				return err
@@ -113,7 +120,8 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, innerGlob st
 					ia = NewInnerArtifact()
 				}
 				ia.SourcePath = hdr.Name
-				ia.FromGlob = innerGlob
+
+				ia.FromGlob = currentGlob
 				innerfile, err := io.ReadAll(tr)
 				if err != nil {
 					l.WithError(err).Error("failed to read")
@@ -132,6 +140,9 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, innerGlob st
 				if err != nil {
 					l.WithError(err).WithField("innerfile", innerfile).Error("failed to match file")
 					return err
+				}
+				if strings.HasSuffix(localFile, "/") {
+					localFile = path.Join(localFile, hdr.Name)
 				}
 				l.Debugf("inner file \"%s\" is %s", hdr.Name, kind.MIME.Value)
 
