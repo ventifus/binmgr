@@ -2,6 +2,7 @@ package backend
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
@@ -159,6 +160,51 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, globs string
 			}
 		}
 		return errors.Errorf("no matching files in tar")
+	} else if kind.MIME.Value == "application/zip" {
+		l.Debug("decompressing zip")
+		currentGlob := globList[globIndex]
+		globIndex++
+		z, err := zip.NewReader(bytes.NewReader(file), int64(len(file)))
+		if err != nil {
+			l.WithError(err).Error("failed to read")
+			return err
+		}
+		for _, zfile := range z.File {
+			l.Debugf("zip file: %s", zfile.Name)
+			match, err := path.Match(currentGlob, zfile.Name)
+			if err != nil {
+				l.WithError(err).Error("failed to match file")
+				return err
+			}
+			if match {
+				// newInnerArtifact := false
+				if ia == nil {
+					// newInnerArtifact = true
+					ia = NewInnerArtifact()
+				}
+				ia.SourcePath = zfile.Name
+
+				ia.FromGlob = currentGlob
+				ia.LocalFile = localFile
+				zf, err := zfile.Open()
+				if err != nil {
+					l.WithField("file", zfile.Name).WithError(err).Error("failed to open zip entry")
+					return err
+				}
+				f, err := io.ReadAll(zf)
+				if err != nil {
+					l.WithField("file", zfile.Name).WithError(err).Error("failed to read zip entry")
+					return err
+				}
+				err = installBin(f, localFile)
+				if err != nil {
+					return err
+				}
+				artifact.Installed = true
+				return nil
+			}
+		}
+		return errors.Errorf("no matching files in zip")
 	} else if kind.MIME.Value == "application/x-executable" || kind.MIME.Value == "" {
 		// Assume an object with no MIME type is a binary file.
 		artifact.LocalFile = localFile
