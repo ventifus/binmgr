@@ -9,7 +9,7 @@ require (
 	github.com/go-errors/errors v1.5.1
 	github.com/google/go-github/v55 v55.0.0
 	github.com/h2non/filetype v1.1.3
-	github.com/k0kubun/pp/v3 v3.4.1
+	github.com/k0kubun/pp/v3 v3.5.0
 	github.com/schollz/progressbar/v3 v3.18.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
@@ -23,7 +23,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.3.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
@@ -40,6 +40,6 @@ require (
 	golang.org/x/crypto v0.35.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/term v0.29.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
