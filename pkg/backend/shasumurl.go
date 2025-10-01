@@ -98,7 +98,7 @@ func UpdateShasumUrl(ctx context.Context, m *BinmgrManifest) error {
 					}
 					for _, ia := range a.InnerArtifacts {
 						fmt.Printf("    - %s\n", ia.LocalFile)
-						err = InstallFile(a, file, ia.LocalFile, a.FromGlob)
+						err = InstallFile(a, file, ia.LocalFile, ia.FromGlob)
 						if err != nil {
 							return err
 						}

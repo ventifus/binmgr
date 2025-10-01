@@ -19,6 +19,8 @@ type Artifact struct {
 	AssetUrl       string           `json:"asset"`
 	RemoteFile     string           `json:"remote_file"`
 	Checksums      []string         `json:"checksums"`
+	ChecksumType   string           `json:"checksum_type"`
+	ChecksumFile   string           `json:"checksum_file"`
 	Installed      bool             `json:"installed"`
 	FromGlob       string           `json:"from_glob"`
 	InnerArtifacts []*InnerArtifact `json:"inner_artifacts"`
@@ -33,15 +35,15 @@ type InnerArtifact struct {
 }
 
 type BinmgrManifest struct {
-	Type             string            `json:"type"`
-	Name             string            `json:"name"`
-	ManifestFileName string            `json:"-"`
-	CurrentVersion   string            `json:"version"`
-	CurrentRemoteUrl string            `json:"remote_url"`
-	LatestRemoteUrl  string            `json:"latest_url"`
-	ChecksumFile     string            `json:"checksum_file"`
-	Artifacts        []*Artifact       `json:"artifacts"`
-	Properties       map[string]string `json:"properties"`
+	Type             string `json:"type"`
+	Name             string `json:"name"`
+	ManifestFileName string `json:"-"`
+	CurrentVersion   string `json:"version"`
+	CurrentRemoteUrl string `json:"remote_url"`
+	LatestRemoteUrl  string `json:"latest_url"`
+	// ChecksumFile     string            `json:"checksum_file"`
+	Artifacts  []*Artifact       `json:"artifacts"`
+	Properties map[string]string `json:"properties"`
 }
 
 func NewArtifact() *Artifact {

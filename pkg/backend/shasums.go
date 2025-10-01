@@ -14,9 +14,29 @@ import (
 	"github.com/go-errors/errors"
 )
 
+const (
+	ChecksumShasum256         = "sha256sums"
+	ChecksumPerAssetSig       = "per_asset:sig"
+	ChecksumPerAssetPem       = "per_asset:pem"
+	ChecksumPerAssetSha256Sum = "per_asset:sha256sum"
+	ChecksumPerAssetSha256    = "per_asset:sha256"
+	ChecksumMultiSum          = "multisum"
+)
+
 type ChecksumEntry struct {
 	Sum  string
 	Name string
+}
+
+func ChecksumTypes() []string {
+	return []string{
+		ChecksumShasum256,
+		ChecksumPerAssetSig,
+		ChecksumPerAssetPem,
+		ChecksumPerAssetSha256Sum,
+		ChecksumPerAssetSha256,
+		ChecksumMultiSum,
+	}
 }
 
 func ComputeChecksum(b []byte) (string, error) {
@@ -49,7 +69,7 @@ func GetChecksumUrl(client *http.Client, url string) ([]ChecksumEntry, error) {
 	for scanner.Scan() {
 		sections := strings.SplitN(scanner.Text(), " ", 2)
 		filename := strings.TrimSpace(sections[1])
-		filename = strings.TrimPrefix(filename, "*") // Found one sha256sums.txt where filenames all begain with '*'
+		filename = strings.TrimPrefix(filename, "*") // Found one sha256sums.txt where filenames all begin with '*'
 		csums = append(csums, ChecksumEntry{
 			Sum:  strings.TrimSpace(sections[0]),
 			Name: filename,

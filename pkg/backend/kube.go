@@ -72,8 +72,8 @@ func InstallKubeFile(ctx context.Context, u *url.URL, fileGlob string, outFile s
 		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", a.LocalFile)
 	}
 
-	m.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
-	shasum, err := getUrlAsString(nil, m.ChecksumFile)
+	a.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
+	shasum, err := getUrlAsString(nil, a.ChecksumFile)
 	if err != nil {
 		log.WithError(err).Errorf("failed to get checksum")
 		return err
@@ -119,8 +119,8 @@ func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
 			remoteFile := u.String()
 			fmt.Printf("  upgrade %s -> %s\n", path.Base(a.RemoteFile), path.Base(remoteFile))
 			a.RemoteFile = remoteFile
-			m.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
-			shasum, err := getUrlAsString(nil, m.ChecksumFile)
+			a.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
+			shasum, err := getUrlAsString(nil, a.ChecksumFile)
 			if err != nil {
 				log.WithError(err).Errorf("failed to get checksum")
 				return err
@@ -153,7 +153,7 @@ func KubeUrlStatus(ctx context.Context, m *BinmgrManifest) error {
 
 	fmt.Printf("Package %s %s\n", m.Name, kubeVersion)
 	if kubeVersion != m.CurrentVersion {
-		fmt.Printf("  upgrade %s -> %s", m.CurrentVersion, kubeVersion)
+		fmt.Printf("  upgrade %s -> %s\n", m.CurrentVersion, kubeVersion)
 		return nil
 	}
 

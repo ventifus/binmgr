@@ -22,7 +22,7 @@ var installCmd = &cobra.Command{
 	Use:   "install [URL]",
 	Short: "Installs a binary",
 	Long:  `Installs binaries found at one or more URLs.`,
-	Args:  validate,
+	Args:  installArgs,
 	RunE:  install,
 }
 
@@ -30,12 +30,15 @@ func getPackageTypes() []string {
 	return []string{"github", "tarball", "shasumurl", "kubefile"}
 }
 
-func validate(cmd *cobra.Command, args []string) error {
+func installArgs(cmd *cobra.Command, args []string) error {
 	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 		return err
 	}
 	if val := cmd.Flag("type").Value.String(); !slices.Contains(getPackageTypes(), val) {
 		return errors.Errorf("unsupported type %s", val)
+	}
+	if val := cmd.Flag("checksumtype").Value.String(); !slices.Contains(backend.ChecksumTypes(), val) {
+		return errors.Errorf("unsupported checksum type %s", val)
 	}
 	return nil
 }
@@ -46,6 +49,7 @@ func install(cmd *cobra.Command, args []string) error {
 	fileGlob := cmd.Flag("file").Value.String()
 	outFile := cmd.Flag("outfile").Value.String()
 	remoteType := cmd.Flag("type").Value.String()
+	checksumType := cmd.Flag("checksumtype").Value.String()
 	remoteUrlHttps := args[0]
 	if !strings.Contains(remoteUrlHttps, "://") {
 		remoteUrlHttps = fmt.Sprintf("https://%s", remoteUrlHttps)
@@ -71,11 +75,12 @@ func install(cmd *cobra.Command, args []string) error {
 	})
 	log.Debug("attempting install")
 
-	if remoteType == "github" {
-		return backend.InstallGithub(ctx, remoteUrl, fileGlob, outFile)
-	} else if remoteType == "kubeurl" {
+	switch remoteType {
+	case "github":
+		return backend.InstallGithub(ctx, remoteUrl, fileGlob, outFile, checksumType)
+	case "kubeurl":
 		return backend.InstallKubeFile(ctx, remoteUrl, fileGlob, outFile)
-	} else if remoteType == "shasumurl" {
+	case "shasumurl":
 		return backend.InstallShasumUrl(ctx, remoteUrl, fileGlob, outFile)
 	}
 
@@ -88,4 +93,7 @@ func init() {
 	installCmd.Flags().String("file", "", "If there are multiple files, select file name to install")
 	installCmd.Flags().String("outfile", "", "The local file name")
 	installCmd.Flags().String("xform", "", "Transform file names with regex")
+	installCmd.Flags().String("checksumtype", "sha256sums", fmt.Sprintf(
+		"Type of checksum to use [%s]", strings.Join(backend.ChecksumTypes(), ","),
+	))
 }

@@ -16,11 +16,31 @@ import (
 
 // uninstallCmd represents the uninstall command
 var updateCmd = &cobra.Command{
-	Use:   "update",
+	Use:   "update [PACKAGE]",
 	Short: "Updates all installed binaries",
 	Long:  `Checks the status of each installed binary and updates each one to the latest version`,
 	RunE:  update,
 }
+
+// func getInstalledPackages() []string {
+// 	manifests, err := backend.GetAllManifests()
+// 	if err != nil {
+// 		log.WithError(err).Error("failed to get installed packages")
+// 		return nil
+// 	}
+// 	var packages []string
+// 	for _, m := range manifests {
+// 		packages = append(packages, m.Name)
+// 	}
+// 	return packages
+// }
+
+// func updateArgs(cmd *cobra.Command, args []string) error {
+// 	if val := cmd.Flag("package").Value.String(); !slices.Contains(getInstalledPackages(), val) {
+// 		return errors.Errorf("package %s is not installed", val)
+// 	}
+// 	return nil
+// }
 
 func update(cmd *cobra.Command, args []string) error {
 	// log := log.WithField("command", "list")
@@ -39,7 +59,7 @@ func update(cmd *cobra.Command, args []string) error {
 				err = updatePackage(ctx, m)
 				if err != nil {
 					log.WithError(err).Debug("update package failed")
-					fmt.Printf("Error: %v", err)
+					fmt.Printf("Error: %v\n", err)
 				}
 			}
 		}
@@ -48,12 +68,12 @@ func update(cmd *cobra.Command, args []string) error {
 }
 
 func updatePackage(ctx context.Context, m *backend.BinmgrManifest) error {
-	if m.Type == "github" {
+	switch m.Type {
+	case "github":
 		return backend.UpdateGithub(ctx, m)
-
-	} else if m.Type == "shasumurl" {
+	case "shasumurl":
 		return backend.UpdateShasumUrl(ctx, m)
-	} else if m.Type == "kubeurl" {
+	case "kubeurl":
 		return backend.UpdateKubeUrl(ctx, m)
 	}
 	return nil
@@ -70,7 +90,7 @@ func updateAll(ctx context.Context) error {
 		err = updatePackage(ctx, m)
 		if err != nil {
 			log.WithError(err).Debug("update package failed")
-			fmt.Printf("Error: %v", err)
+			fmt.Printf("Error: %v\n", err)
 		}
 	}
 	return nil
