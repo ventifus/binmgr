@@ -9,7 +9,7 @@ require (
 	github.com/go-errors/errors v1.5.1
 	github.com/google/go-github/v55 v55.0.0
 	github.com/h2non/filetype v1.1.3
-	github.com/k0kubun/pp/v3 v3.5.0
+	github.com/k0kubun/pp/v3 v3.5.1
 	github.com/schollz/progressbar/v3 v3.18.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -39,5 +39,5 @@ require (
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 )
