@@ -11,7 +11,7 @@ require (
 	github.com/h2non/filetype v1.1.3
 	github.com/k0kubun/pp/v3 v3.5.0
 	github.com/schollz/progressbar/v3 v3.18.0
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
 )
