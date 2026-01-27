@@ -15,40 +15,40 @@ const (
 )
 
 type Artifact struct {
-	LocalFile      string           `json:"local_file"`
-	AssetUrl       string           `json:"asset"`
-	RemoteFile     string           `json:"remote_file"`
-	Checksums      []string         `json:"checksums"`
-	ChecksumType   string           `json:"checksum_type"`
-	ChecksumFile   string           `json:"checksum_file"`
-	Installed      bool             `json:"installed"`
-	FromGlob       string           `json:"from_glob"`
-	InnerArtifacts []*InnerArtifact `json:"inner_artifacts"`
+	LocalFile      string            `json:"local_file"`
+	AssetUrl       string            `json:"asset"`
+	RemoteFile     string            `json:"remote_file"`
+	Checksums      map[string]string `json:"checksums"`
+	ChecksumType   string            `json:"checksum_type"`
+	ChecksumFile   string            `json:"checksum_file"`
+	Installed      bool              `json:"installed"`
+	FromGlob       string            `json:"from_glob"`
+	InnerArtifacts []*InnerArtifact  `json:"inner_artifacts"`
 }
 
 type InnerArtifact struct {
-	FromGlob   string   `json:"from_glob"`
-	Checksums  []string `json:"checksums"`
-	Installed  bool     `json:"installed"`
-	SourcePath string   `json:"source"`
-	LocalFile  string   `json:"local_file"`
+	FromGlob   string            `json:"from_glob"`
+	Checksums  map[string]string `json:"checksums"`
+	Installed  bool              `json:"installed"`
+	SourcePath string            `json:"source"`
+	LocalFile  string            `json:"local_file"`
 }
 
 type BinmgrManifest struct {
-	Type             string `json:"type"`
-	Name             string `json:"name"`
-	ManifestFileName string `json:"-"`
-	CurrentVersion   string `json:"version"`
-	CurrentRemoteUrl string `json:"remote_url"`
-	LatestRemoteUrl  string `json:"latest_url"`
-	// ChecksumFile     string            `json:"checksum_file"`
-	Artifacts  []*Artifact       `json:"artifacts"`
-	Properties map[string]string `json:"properties"`
+	Type             string            `json:"type"`
+	Name             string            `json:"name"`
+	ManifestFileName string            `json:"-"`
+	CurrentVersion   string            `json:"version"`
+	CurrentRemoteUrl string            `json:"remote_url"`
+	LatestRemoteUrl  string            `json:"latest_url"`
+	Artifacts        []*Artifact       `json:"artifacts"`
+	Properties       map[string]string `json:"properties"`
+	Cmdline          []string          `json:"cmdline,omitempty"`
 }
 
 func NewArtifact() *Artifact {
 	return &Artifact{
-		Checksums:      make([]string, 0),
+		Checksums:      make(map[string]string, 0),
 		InnerArtifacts: make([]*InnerArtifact, 0),
 	}
 }
@@ -59,6 +59,7 @@ func NewInnerArtifact() *InnerArtifact {
 
 func NewBinmgrManifest() *BinmgrManifest {
 	return &BinmgrManifest{
+		Cmdline:   os.Args[1:],
 		Artifacts: make([]*Artifact, 0),
 	}
 }
@@ -100,6 +101,7 @@ func (m BinmgrManifest) SaveManifest() error {
 func GetAllManifests() ([]*BinmgrManifest, error) {
 	lib, err := os.ReadDir(libDir())
 	if err != nil {
+		log.WithError(err).Error("could not read lib dir")
 		return nil, err
 	}
 	manifests := make([]*BinmgrManifest, len(lib))
@@ -108,6 +110,7 @@ func GetAllManifests() ([]*BinmgrManifest, error) {
 			continue
 		}
 		fileName := path.Join(libDir(), de.Name())
+		log := log.WithField("file", fileName)
 		f, err := os.Open(fileName)
 		if err != nil {
 			log.WithError(err).Error("could not open file")
@@ -124,9 +127,30 @@ func GetAllManifests() ([]*BinmgrManifest, error) {
 		manifests[i] = &BinmgrManifest{}
 		err = json.Unmarshal(b, manifests[i])
 		if err != nil {
+			log.WithError(err).Error("could not unmarshal json")
 			return nil, err
 		}
 		manifests[i].ManifestFileName = path.Base(fileName)
 	}
 	return manifests, nil
+}
+
+func (a *Artifact) GetChecksumAlgorithms() []string {
+	algos := make([]string, len(a.Checksums))
+	i := 0
+	for ctype := range a.Checksums {
+		algos[i] = ctype
+		i++
+	}
+	return algos
+}
+
+func (a *InnerArtifact) GetChecksumAlgorithms() []string {
+	algos := make([]string, len(a.Checksums))
+	i := 0
+	for ctype := range a.Checksums {
+		algos[i] = ctype
+		i++
+	}
+	return algos
 }

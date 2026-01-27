@@ -13,6 +13,8 @@ import (
 	"github.com/apex/log"
 	"github.com/go-errors/errors"
 	"github.com/google/go-github/v55/github"
+	"github.com/k0kubun/pp/v3"
+	"go.yaml.in/yaml/v3"
 )
 
 type GithubAsset struct {
@@ -31,10 +33,110 @@ type GithubRepo struct {
 	repo     string
 }
 
+type GhConfig struct {
+	Hosts map[string]GhHostConfig `yaml:",inline"`
+}
+
+type GhHostConfig struct {
+	User        string                  `yaml:"user"`
+	OauthToken  string                  `yaml:"oauth_token"`
+	GitProtocol string                  `yaml:"git_protocol"`
+	Users       map[string]GhUserConfig `yaml:"users"`
+}
+
+type GhUserConfig struct {
+	OauthToken string `yaml:"oauth_token"`
+}
+
+func expandVariables(release *github.RepositoryRelease, s string) string {
+	tag := release.GetTagName()
+	version := strings.TrimPrefix(tag, "v")
+	s = strings.ReplaceAll(s, "${TAG}", tag)
+	s = strings.ReplaceAll(s, "${VERSION}", version)
+	return s
+}
+
+func getGithubClientFromGhConfig(f *os.File) (*github.Client, error) {
+	ghConfig, err := parseGhConfig(f)
+	if err != nil {
+		return nil, err
+	}
+	hostConfig, ok := ghConfig.Hosts["github.com"]
+	if !ok {
+		pp.Println(ghConfig)
+		return nil, errors.Errorf("no github.com host found in gh config")
+	}
+	token := hostConfig.OauthToken
+	if token == "" {
+		return nil, errors.Errorf("no oauth_token found in gh config for github.com")
+	}
+	ts := github.BasicAuthTransport{
+		Username: "oauth2",
+		Password: token,
+	}
+	client := github.NewClient(ts.Client())
+	return client, nil
+}
+
+func parseGhConfig(f *os.File) (*GhConfig, error) {
+	ghConfig := &GhConfig{}
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, stat.Size())
+	_, err = f.Read(data)
+	if err != nil {
+		return nil, err
+	}
+	err = yaml.Unmarshal(data, ghConfig)
+	if err != nil {
+		return nil, err
+	}
+	return ghConfig, nil
+}
+
+func newGithubClient() *github.Client {
+	// load oauth token from ~/.config/gh/hosts.yml if available
+	ctx := context.TODO()
+	var client *github.Client
+	f, err := os.Open(path.Join(os.Getenv("HOME"), ".config/gh/hosts.yml"))
+	if err != nil {
+		log.WithError(err).Warn("could not open gh config file; using unauthenticated github client")
+		client = github.NewClient(nil)
+	} else {
+		client, err = getGithubClientFromGhConfig(f)
+		f.Close()
+		if err != nil {
+			log.WithError(err).Error("failed to create github client from gh config")
+		}
+	}
+	if client == nil {
+		log.Debug("Using anonymous github access")
+		client = github.NewClient(nil)
+	}
+
+	u, _, err := client.Users.Get(ctx, "")
+	if u != nil {
+		log.Debugf("using github user: %s", u.GetLogin())
+	}
+
+	rl, _, err := client.RateLimits(ctx)
+	if err == nil {
+		log.WithField("rate", rl.Core.Remaining).WithField("reset", rl.Core.Reset.Time).Debug("github rate limit")
+	} else {
+		log.WithError(err).Error("failed to get github rate limit")
+	}
+	client.APIMeta(ctx)
+	return client
+}
+
 func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, outFile string, checksumType string) error {
 	if githubUrl.Host != "github.com" {
 		return fmt.Errorf("this type is only valid for github.com")
 	}
+	log := log.WithField("url", githubUrl.String())
+
 	githubPath := strings.Split(githubUrl.Path, "/")
 	owner := githubPath[1]
 	repo := githubPath[2]
@@ -54,14 +156,20 @@ func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, out
 	if err != nil {
 		return err
 	}
-	fileGlob = strings.ReplaceAll(fileGlob, "${VERSION}", gh.Manifest.CurrentVersion)
 
+	fileGlob = expandVariables(gh.release, fileGlob)
 	globs := strings.Split(fileGlob, "!")
 
-	err = gh.SelectAssetByGlob(globs[0], checksumType)
+	asset, err := getAssetByGlob(gh.release, globs[0])
 	if err != nil {
 		return err
 	}
+	artifact, err := gh.newArtifactFromAsset(gh.release, asset, checksumType)
+	if err != nil {
+		return err
+	}
+	artifact.FromGlob = globs[0]
+	gh.Manifest.Artifacts = append(gh.Manifest.Artifacts, artifact)
 
 	for _, artifact := range gh.Manifest.Artifacts {
 		err = VerifyLocalFile(artifact)
@@ -139,7 +247,8 @@ func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
 		} else {
 			for _, ia := range newArtifact.InnerArtifacts {
 				if ia.Installed {
-					err = InstallFile(newArtifact, f, ia.LocalFile, ia.FromGlob)
+					globs := expandVariables(repo.release, ia.FromGlob)
+					err = InstallFile(newArtifact, f, ia.LocalFile, globs)
 					if err != nil {
 						return err
 					}
@@ -166,47 +275,14 @@ func GithubStatus(ctx context.Context, m *BinmgrManifest) error {
 	if currentVersion == repo.Manifest.CurrentVersion {
 		log.WithField("version", repo.Manifest.CurrentVersion).Debug("no update found")
 		fmt.Println("  no update needed")
-		// pp.Println(m)
-		// pp.Println(repo.Manifest)
 		return nil
 	}
 	fmt.Printf("  upgrade %s -> %s\n", currentVersion, repo.Manifest.CurrentVersion)
 	return nil
 }
 
-func getAssetByGlobOrPartial(release *github.RepositoryRelease, nameGlob string) (*github.ReleaseAsset, error) {
-	for _, asset := range release.Assets {
-		t, err := filepath.Match(nameGlob, asset.GetName())
-		if err != nil {
-			return nil, err
-		}
-		if t {
-			return asset, nil
-		}
-	}
-	return nil, errors.Errorf("asset found matching %s", nameGlob)
-}
-
-// func findShaSums(release *github.RepositoryRelease) []*github.ReleaseAsset {
-// 	shasums := make([]*github.ReleaseAsset, 0)
-// 	for _, asset := range release.Assets {
-// 		assetName := asset.GetName()
-// 		if !strings.HasSuffix(assetName, ".pem") && !strings.HasSuffix(assetName, ".sig") {
-// 			if (strings.Contains(assetName, "sha") && strings.Contains(assetName, "sum")) ||
-// 				strings.Contains(assetName, "checksum") {
-// 				log.WithField("url", *asset.BrowserDownloadURL).Debug("using checksum file")
-// 				shasums = append(shasums, asset)
-// 			}
-// 		}
-// 	}
-// 	if len(shasums) == 0 {
-// 		log.Debug("no checksums selected")
-// 	}
-// 	return shasums
-// }
-
 func getChecksumFile(release *github.RepositoryRelease, asset *github.ReleaseAsset, checksumType string) (*github.ReleaseAsset, error) {
-	checksumTypes := strings.SplitN(checksumType, "!", 2)
+	checksumTypes := strings.Split(checksumType, "!")
 	checksumGlob := ""
 	if len(checksumTypes) > 1 {
 		checksumGlob = checksumTypes[1]
@@ -220,34 +296,32 @@ func getChecksumFile(release *github.RepositoryRelease, asset *github.ReleaseAss
 			checksumGlob = asset.GetName() + "." + strings.TrimPrefix(checksumType, "per_asset:")
 		}
 	} else {
-		return nil, errors.Errorf("unsupported checksum type %s", checksumType)
+		return nil, errors.Errorf("unsupported checksum type %s for github module", checksumType)
 	}
-	for _, asset := range release.Assets {
-		match, err := path.Match(checksumGlob, asset.GetName())
-		if err != nil {
-			return nil, err
-		}
-		if match {
-			return asset, nil
-		}
-	}
-	log.WithField("asset", asset.GetName()).WithField("checksumfile", checksumGlob).Debug("could not find matching checksum file")
-	return nil, errors.Errorf("no checksum file found matching %v", checksumGlob)
+	checksumGlob = expandVariables(release, checksumGlob)
+	log.WithFields(log.Fields{
+		"asset": asset.GetName(),
+		"type":  checksumTypes[0],
+		"glob":  checksumGlob,
+	}).Debug("looking for matching checksum file")
+	asset, err := getAssetByGlob(release, checksumGlob)
+	return asset, err
 }
 
 func NewGithubRepo(owner string, repo string) *GithubRepo {
+
+	m := NewBinmgrManifest()
+	m.Type = "github"
+	m.Properties = map[string]string{
+		"owner": owner,
+		"repo":  repo,
+	}
 	r := GithubRepo{
-		Manifest: &BinmgrManifest{
-			Type: "github",
-			Properties: map[string]string{
-				"owner": owner,
-				"repo":  repo,
-			},
-		},
-		log:    log.WithField("owner", owner).WithField("repo", repo),
-		client: github.NewClient(nil),
-		owner:  owner,
-		repo:   repo,
+		Manifest: m,
+		log:      log.WithField("owner", owner).WithField("repo", repo),
+		client:   newGithubClient(),
+		owner:    owner,
+		repo:     repo,
 	}
 	return &r
 }
@@ -258,7 +332,7 @@ func NewGithubRepoFromManifest(manifest *BinmgrManifest) *GithubRepo {
 	r := GithubRepo{
 		Manifest: manifest,
 		log:      log.WithField("owner", owner).WithField("repo", repo),
-		client:   github.NewClient(nil),
+		client:   newGithubClient(),
 		owner:    owner,
 		repo:     repo,
 	}
@@ -306,17 +380,58 @@ func (g *GithubRepo) GetRelease(ctx context.Context, u []string) error {
 }
 
 func (g *GithubRepo) newArtifactFromAsset(release *github.RepositoryRelease, asset *github.ReleaseAsset, checksumType string) (*Artifact, error) {
-	checksums := make([]string, 0)
-	checksumFile, err := getChecksumFile(release, asset, checksumType)
-	if err != nil {
-		return nil, err
+	checksums := make(map[string]string, 0)
+	checksumTypes := strings.Split(checksumType, "!")
+	checksumUrl := ""
+	switch checksumTypes[0] {
+	case ChecksumShasum256:
+		checksumGlob := "sha256sum"
+		if len(checksumTypes) > 1 && checksumTypes[1] != "" {
+			checksumGlob = checksumTypes[1]
+			checksumGlob = expandVariables(release, checksumGlob)
+		}
+		checksumFile, err := getAssetByGlob(release, checksumGlob)
+		if err != nil {
+			log.WithError(err).Error("failed to retrieve checksum file")
+			return nil, err
+		}
+		checksumUrl = checksumFile.GetBrowserDownloadURL()
+		log.WithField("file", checksumFile).WithField("url", checksumUrl).Debug("got checksum file")
+		checksum, err := GetSumForFile(nil, checksumUrl, asset.GetName())
+		if err != nil {
+			return nil, err
+		}
+		checksums[ChecksumShasum256] = checksum
+	case ChecksumMultiSum:
+		checksumGlob := "checksums"
+		if len(checksumTypes) > 1 && checksumTypes[1] != "" {
+			checksumGlob = checksumTypes[1]
+		}
+		mapGlob := "checksums_hashes_order"
+		if len(checksumTypes) > 2 && checksumTypes[2] != "" {
+			mapGlob = checksumTypes[2]
+		}
+		checksumFile, err := getAssetByGlob(release, checksumGlob)
+		if err != nil {
+			return nil, err
+		}
+		mapFile, err := getAssetByGlob(release, mapGlob)
+		if err != nil {
+			return nil, err
+		}
+		checksumUrl = checksumFile.GetBrowserDownloadURL()
+		csumMap, err := GetChecksumMap(nil, mapFile.GetBrowserDownloadURL())
+		if err != nil {
+			return nil, err
+		}
+		log.WithField("map", csumMap).Debug("retrieved checksum map")
+		checksums, err = GetMultiSumForFile(nil, csumMap, checksumUrl, asset.GetName())
+		if err != nil {
+			return nil, err
+		}
 	}
-	checksumUrl := checksumFile.GetBrowserDownloadURL()
-	checksum, err := GetSumForFile(nil, checksumUrl, asset.GetName())
-	if err != nil {
-		return nil, err
-	}
-	checksums = append(checksums, checksum)
+	log.WithField("checksums", checksums).Debug("retrieved checksums")
+
 	artifact := NewArtifact()
 	artifact.AssetUrl = *asset.URL
 	artifact.RemoteFile = asset.GetBrowserDownloadURL()
@@ -327,22 +442,8 @@ func (g *GithubRepo) newArtifactFromAsset(release *github.RepositoryRelease, ass
 	return artifact, nil
 }
 
-func (g *GithubRepo) SelectAssetByGlob(glob string, checksumType string) error {
-	asset, err := getAssetByGlobOrPartial(g.release, glob)
-	if err != nil {
-		return err
-	}
-	artifact, err := g.newArtifactFromAsset(g.release, asset, checksumType)
-	if err != nil {
-		return err
-	}
-	artifact.FromGlob = glob
-	g.Manifest.Artifacts = append(g.Manifest.Artifacts, artifact)
-	return nil
-}
-
 func (g *GithubRepo) UpdateArtifact(a *Artifact) (*Artifact, error) {
-	asset, err := getAssetByGlobOrPartial(g.release, a.FromGlob)
+	asset, err := getAssetByGlob(g.release, a.FromGlob)
 	if err != nil {
 		log.WithError(err).Error("failed to find asset by glob")
 		return nil, err
@@ -356,86 +457,20 @@ func (g *GithubRepo) UpdateArtifact(a *Artifact) (*Artifact, error) {
 	return artifact, err
 }
 
-// func GetGithubManifest(ctx context.Context, owner string, repo string, remoteNameGlob string, localName string) (*BinmgrManifest, error) {
-// 	log := log.WithField("f", "GetGithubManifest").WithField("owner", owner).WithField("repo", repo)
-// 	manifest := &BinmgrManifest{Type: "github", Properties: make(map[string]string)}
-// 	client := github.NewClient(nil)
-// 	release, resp, err := client.Repositories.GetLatestRelease(ctx, owner, repo)
-// 	log = log.WithField("url", resp.Request.URL)
-// 	if err != nil {
-// 		log.WithError(err).Errorf("failed to get github release")
-// 		return nil, err
-// 	}
-// 	if resp.StatusCode != 200 {
-// 		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Errorf("failed to get github release")
-// 		return nil, errors.Errorf("github.com/%s/%s: %s", owner, repo, resp.Status)
-// 	} else {
-// 		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get github release")
-// 	}
-// 	manifest.Name = fmt.Sprintf("github.com_%s_%s", owner, repo)
-// 	manifest.CurrentRemoteUrl = release.GetURL()
-// 	manifest.CurrentVersion = release.GetTagName()
-// 	manifest.LatestRemoteUrl = fmt.Sprintf("https://github.com/%s/%s", owner, repo)
-// 	manifest.Properties["owner"] = owner
-// 	manifest.Properties["repo"] = repo
-
-// 	asset, err := getAssetByGlobOrPartial(release, remoteNameGlob)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	checksums := make([]string, 0)
-// 	if asset != nil {
-// 		shasums, err := getChecksumFile(release, asset)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		for _, csum := range shasums {
-// 			manifest.ChecksumFile = csum.GetBrowserDownloadURL()
-// 			checksum, err := GetSumForFile(nil, csum.GetBrowserDownloadURL(), asset.GetName())
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			checksums = append(checksums, checksum)
-// 		}
-// 		manifest.Artifacts = append(manifest.Artifacts, &Artifact{
-// 			LocalFile:  localName,
-// 			AssetUrl:   *asset.URL,
-// 			RemoteFile: asset.GetBrowserDownloadURL(),
-// 			Checksums:  checksums,
-// 			Installed:  false,
-// 			FromGlob:   remoteNameGlob,
-// 		})
-// 	}
-// 	return manifest, nil
-// }
-
-// func GetLatestGithubAsset(ctx context.Context, owner string, repo string, file string) (*GithubAsset, error) {
-// 	log := log.WithField("f", "GetLatestGithubAsset").WithField("owner", owner).WithField("repo", repo)
-// 	log.Infof("getting latest github asset")
-// 	release, err := getLatestRelease(ctx, owner, repo)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	asset, err := getAssetByGlobOrPartial(release, file)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	checksums := make([]string, 0)
-// 	if asset != nil {
-// 		shasums := findShaSums(release)
-// 		for _, csum := range shasums {
-// 			checksum, err := GetSumForFile(nil, csum.GetBrowserDownloadURL(), asset.GetName())
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			checksums = append(checksums, checksum)
-// 		}
-// 		return &GithubAsset{
-// 			Name:      asset.GetName(),
-// 			Version:   release.GetTagName(),
-// 			Url:       asset.GetBrowserDownloadURL(),
-// 			Checksums: checksums,
-// 		}, nil
-// 	}
-// 	return nil, errors.Errorf("asset %s not found", file)
-// }
+func getAssetByGlob(release *github.RepositoryRelease, nameGlob string) (*github.ReleaseAsset, error) {
+	for _, asset := range release.Assets {
+		t, err := filepath.Match(nameGlob, asset.GetName())
+		log.WithFields(log.Fields{
+			"glob":  nameGlob,
+			"match": t,
+			"asset": asset.GetName(),
+		}).Debug("asset")
+		if err != nil {
+			return nil, err
+		}
+		if t {
+			return asset, nil
+		}
+	}
+	return nil, errors.Errorf("no asset found matching %s", nameGlob)
+}

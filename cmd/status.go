@@ -7,7 +7,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/k0kubun/pp/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/ventifus/binmgr/pkg/backend"
@@ -28,9 +27,6 @@ func status(cmd *cobra.Command, args []string) error {
 	manifests, err := backend.GetAllManifests()
 	if err != nil {
 		return err
-	}
-	if loglevel == "debug" {
-		pp.Println(manifests)
 	}
 	for _, m := range manifests {
 		if m.Type == "github" {

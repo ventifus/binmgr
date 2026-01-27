@@ -31,13 +31,10 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, globs string
 	globIndex := 0
 
 	l := log.WithField("localfile", localFile).WithField("globs", globList)
-	for _, c := range artifact.Checksums {
-		err := VerifyBytes(file, c)
-		if err != nil {
-			return err
-		}
+	err := VerifyBytes(file, artifact.Checksums)
+	if err != nil {
+		return err
 	}
-	var err error
 	kind, err := filetype.Match(file)
 	if err != nil {
 		return err
@@ -128,12 +125,12 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, globs string
 					l.WithError(err).Error("failed to read")
 					return err
 				}
-				csum, err := ComputeChecksum(innerfile)
+				csums, err := ComputeChecksums(innerfile, ia.GetChecksumAlgorithms())
 				if err != nil {
 					l.WithError(err).Error("failed to match checksum")
 					return nil
 				}
-				ia.Checksums = []string{csum}
+				ia.Checksums = csums
 				if newInnerArtifact {
 					artifact.InnerArtifacts = append(artifact.InnerArtifacts, ia)
 				}

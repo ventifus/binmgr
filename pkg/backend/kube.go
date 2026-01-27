@@ -78,7 +78,7 @@ func InstallKubeFile(ctx context.Context, u *url.URL, fileGlob string, outFile s
 		log.WithError(err).Errorf("failed to get checksum")
 		return err
 	}
-	a.Checksums = []string{shasum}
+	a.Checksums = map[string]string{AlgorithmSha256: shasum}
 
 	m.Artifacts = append(m.Artifacts, a)
 	fmt.Printf("Installing %s from %s\n", path.Base(outFile), a.RemoteFile)
@@ -125,7 +125,7 @@ func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
 				log.WithError(err).Errorf("failed to get checksum")
 				return err
 			}
-			a.Checksums = []string{shasum}
+			a.Checksums = map[string]string{AlgorithmSha256: shasum}
 			file, err := DownloadFile(ctx, nil, a)
 			if err != nil {
 				log.WithError(err).Errorf("failed to download file")

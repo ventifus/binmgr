@@ -32,12 +32,15 @@ func getPackageTypes() []string {
 
 func installArgs(cmd *cobra.Command, args []string) error {
 	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		log.WithError(err).Error("invalid number of arguments")
 		return err
 	}
 	if val := cmd.Flag("type").Value.String(); !slices.Contains(getPackageTypes(), val) {
+		log.Error("unsupported type")
 		return errors.Errorf("unsupported type %s", val)
 	}
-	if val := cmd.Flag("checksumtype").Value.String(); !slices.Contains(backend.ChecksumTypes(), val) {
+	if val := strings.Split(cmd.Flag("checksumtype").Value.String(), "!")[0]; !slices.Contains(backend.ChecksumTypes(), val) {
+		log.Error("unsupported checksum type")
 		return errors.Errorf("unsupported checksum type %s", val)
 	}
 	return nil
@@ -90,7 +93,7 @@ func install(cmd *cobra.Command, args []string) error {
 func init() {
 	rootCmd.AddCommand(installCmd)
 	installCmd.Flags().String("type", "github", "Type of package")
-	installCmd.Flags().String("file", "", "If there are multiple files, select file name to install")
+	installCmd.Flags().String("file", "", "If there are multiple files, select file name to install. Separate inner file names with an exclamation point `!`.")
 	installCmd.Flags().String("outfile", "", "The local file name")
 	installCmd.Flags().String("xform", "", "Transform file names with regex")
 	installCmd.Flags().String("checksumtype", "sha256sums", fmt.Sprintf(

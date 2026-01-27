@@ -9,7 +9,6 @@ import (
 	"path"
 	"time"
 
-	"github.com/k0kubun/pp/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/ventifus/binmgr/pkg/backend"
@@ -30,9 +29,6 @@ func list(cmd *cobra.Command, args []string) error {
 	manifests, err := backend.GetAllManifests()
 	if err != nil {
 		return err
-	}
-	if loglevel == "debug" {
-		pp.Println(manifests)
 	}
 	//w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0x0)
 	//defer w.Flush()
