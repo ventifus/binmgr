@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/ventifus/binmgr/pkg/backend"
 	"github.com/ventifus/binmgr/pkg/extract"
@@ -103,13 +102,5 @@ func New(
 }
 
 // Install is implemented in install.go.
-
-// Update is not yet implemented.
-func (m *mgr) Update(_ context.Context, _ UpdateOptions) ([]*UpdateResult, error) {
-	return nil, fmt.Errorf("not yet implemented")
-}
-
-// Status is not yet implemented.
-func (m *mgr) Status(_ context.Context, _ []string) ([]*StatusResult, error) {
-	return nil, fmt.Errorf("not yet implemented")
-}
+// Update is implemented in update.go.
+// Status is implemented in status.go.

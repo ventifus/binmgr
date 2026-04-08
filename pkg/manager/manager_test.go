@@ -678,3 +678,654 @@ func TestInstall_LocalNameResolution(t *testing.T) {
 		}
 	}
 }
+
+// ========== Update tests ==========
+
+// newUpdateManager creates a manager with a mock backend whose Check function
+// returns checkResolution and whose Resolve function returns resolveResolution.
+// It also writes the provided manifest into the libDir so Update can load it.
+// The installed binary is created at binPath so Install can overwrite it.
+func newUpdateManager(
+	t *testing.T,
+	pkg *manifest.Package,
+	binPath string,
+	checkResolution *backend.Resolution,
+	resolveResolution *backend.Resolution,
+) (Manager, string) {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fetcher := &MockFetcher{
+		FetchFn: func(ctx context.Context, u string) ([]byte, error) {
+			return []byte("binary-content"), nil
+		},
+	}
+	extractor := &MockExtractor{ExtractFn: noExtract}
+	verifier := &MockVerifier{
+		VerifyFn:  func(ctx context.Context, data []byte, expected map[string]string) error { return nil },
+		ComputeFn: defaultCompute,
+	}
+
+	mb := &MockBackend{
+		TypeFn: func() string { return pkg.Backend },
+		CanHandleFn: func(u *url.URL) bool {
+			return true
+		},
+		ResolveFn: func(ctx context.Context, sourceURL *url.URL, opts backend.ResolveOptions) (*backend.Resolution, error) {
+			return resolveResolution, nil
+		},
+		CheckFn: func(ctx context.Context, p *manifest.Package) (*backend.Resolution, error) {
+			return checkResolution, nil
+		},
+	}
+
+	reg := backend.NewRegistry()
+	reg.Register(mb)
+
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	if err := os.MkdirAll(libDir, 0700); err != nil {
+		t.Fatalf("create libDir: %v", err)
+	}
+
+	// If a binPath is specified, update the package's InstalledFiles to point there
+	// and create a placeholder file.
+	if binPath != "" {
+		if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
+			t.Fatalf("create bin dir: %v", err)
+		}
+		if err := os.WriteFile(binPath, []byte("old-binary"), 0755); err != nil {
+			t.Fatalf("create installed binary: %v", err)
+		}
+		// Patch the first spec's InstalledFiles to the provided binPath.
+		if len(pkg.Specs) > 0 {
+			pkg.Specs[0].InstalledFiles = []manifest.InstalledFile{
+				{LocalPath: binPath, Checksums: map[string]string{}},
+			}
+		}
+	}
+
+	writeManifest(t, libDir, pkg)
+
+	m := New(reg, fetcher, extractor, verifier, libDir)
+	return m, home
+}
+
+// TestUpdate_NewVersionInstalled verifies that when the backend reports a new
+// version, Update calls Install and returns Updated=true.
+func TestUpdate_NewVersionInstalled(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mytool")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/mytool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/mytool",
+		Version:   "v1.0.0",
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "mytool-linux-amd64",
+				LocalName: "mytool",
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+			},
+		},
+	}
+
+	checkResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+	resolveResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+
+	m, _ := newUpdateManager(t, pkg, binPath, checkResolution, resolveResolution)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if !r.Updated {
+		t.Errorf("expected Updated=true, got false")
+	}
+	if r.OldVersion != "v1.0.0" {
+		t.Errorf("OldVersion = %q, want %q", r.OldVersion, "v1.0.0")
+	}
+	if r.NewVersion != "v1.1.0" {
+		t.Errorf("NewVersion = %q, want %q", r.NewVersion, "v1.1.0")
+	}
+}
+
+// TestUpdate_SameVersionSkipped verifies that when the backend reports the same
+// version, Update does not call Install and returns Updated=false.
+func TestUpdate_SameVersionSkipped(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mytool")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/mytool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/mytool",
+		Version:   "v1.0.0",
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "mytool-linux-amd64",
+				LocalName: "mytool",
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+			},
+		},
+	}
+
+	sameResolution := &backend.Resolution{
+		Version: "v1.0.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+
+	fetchCount := 0
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fetcher := &MockFetcher{
+		FetchFn: func(ctx context.Context, u string) ([]byte, error) {
+			fetchCount++
+			return []byte("binary"), nil
+		},
+	}
+	extractor := &MockExtractor{ExtractFn: noExtract}
+	verifier := &MockVerifier{
+		VerifyFn:  func(ctx context.Context, data []byte, expected map[string]string) error { return nil },
+		ComputeFn: defaultCompute,
+	}
+
+	mb := &MockBackend{
+		TypeFn:      func() string { return "github" },
+		CanHandleFn: func(u *url.URL) bool { return true },
+		ResolveFn: func(ctx context.Context, sourceURL *url.URL, opts backend.ResolveOptions) (*backend.Resolution, error) {
+			return sameResolution, nil
+		},
+		CheckFn: func(ctx context.Context, p *manifest.Package) (*backend.Resolution, error) {
+			return sameResolution, nil
+		},
+	}
+	reg := backend.NewRegistry()
+	reg.Register(mb)
+
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	if err := os.MkdirAll(libDir, 0700); err != nil {
+		t.Fatalf("create libDir: %v", err)
+	}
+
+	// Create a placeholder installed file.
+	if err := os.MkdirAll(filepath.Dir(binPath), 0755); err != nil {
+		t.Fatalf("create bin dir: %v", err)
+	}
+	if err := os.WriteFile(binPath, []byte("binary"), 0755); err != nil {
+		t.Fatalf("create installed binary: %v", err)
+	}
+	pkg.Specs[0].InstalledFiles = []manifest.InstalledFile{
+		{LocalPath: binPath, Checksums: map[string]string{}},
+	}
+	writeManifest(t, libDir, pkg)
+
+	m := New(reg, fetcher, extractor, verifier, libDir)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Updated {
+		t.Errorf("expected Updated=false when version unchanged, got true")
+	}
+	if fetchCount != 0 {
+		t.Errorf("expected 0 Fetch calls (no install), got %d", fetchCount)
+	}
+}
+
+// TestUpdate_NamedPinnedPackageUpdates verifies that a pinned package is still
+// updated when named explicitly in opts.Packages.
+func TestUpdate_NamedPinnedPackageUpdates(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mytool")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/mytool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/mytool",
+		Version:   "v1.0.0",
+		Pinned:    true, // pinned — but named explicitly, so should update
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "mytool-linux-amd64",
+				LocalName: "mytool",
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+			},
+		},
+	}
+
+	checkResolution := &backend.Resolution{
+		Version: "v2.0.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+	resolveResolution := &backend.Resolution{
+		Version: "v2.0.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+
+	m, _ := newUpdateManager(t, pkg, binPath, checkResolution, resolveResolution)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{
+		Packages: []PackageTarget{{ID: "example.com/owner/mytool"}},
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Updated {
+		t.Errorf("expected Updated=true for explicitly named pinned package, got false")
+	}
+}
+
+// TestUpdate_Unpin_ClearsPinBeforeUpdate verifies that --unpin clears the pin
+// on the manifest before the update proceeds.
+func TestUpdate_Unpin_ClearsPinBeforeUpdate(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mytool")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/mytool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/mytool",
+		Version:   "v1.0.0",
+		Pinned:    true,
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "mytool-linux-amd64",
+				LocalName: "mytool",
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+			},
+		},
+	}
+
+	checkResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+	resolveResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+
+	m, home := newUpdateManager(t, pkg, binPath, checkResolution, resolveResolution)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{
+		Packages: []PackageTarget{{ID: "example.com/owner/mytool"}},
+		Unpin:    true,
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 || !results[0].Updated {
+		t.Fatalf("expected 1 updated result")
+	}
+
+	// Reload the manifest and verify the pin was cleared.
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	entries, _ := os.ReadDir(libDir)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 manifest, got %d", len(entries))
+	}
+	data, _ := os.ReadFile(filepath.Join(libDir, entries[0].Name()))
+	var updated manifest.Package
+	if err := json.Unmarshal(data, &updated); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if updated.Pinned {
+		t.Errorf("expected Pinned=false after --unpin, got true")
+	}
+}
+
+// TestUpdate_Pin_SetsPinAfterUpdate verifies that --pin sets the pin on the
+// manifest after a successful update.
+func TestUpdate_Pin_SetsPinAfterUpdate(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "mytool")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/mytool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/mytool",
+		Version:   "v1.0.0",
+		Pinned:    false,
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "mytool-linux-amd64",
+				LocalName: "mytool",
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+			},
+		},
+	}
+
+	checkResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+	resolveResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "mytool-linux-amd64", URL: "https://example.com/mytool-linux-amd64"},
+		},
+	}
+
+	m, home := newUpdateManager(t, pkg, binPath, checkResolution, resolveResolution)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{
+		Packages: []PackageTarget{{ID: "example.com/owner/mytool"}},
+		Pin:      true,
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 || !results[0].Updated {
+		t.Fatalf("expected 1 updated result")
+	}
+
+	// Reload the manifest and verify the pin was set.
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	entries, _ := os.ReadDir(libDir)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 manifest, got %d", len(entries))
+	}
+	data, _ := os.ReadFile(filepath.Join(libDir, entries[0].Name()))
+	var updated manifest.Package
+	if err := json.Unmarshal(data, &updated); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if !updated.Pinned {
+		t.Errorf("expected Pinned=true after --pin, got false")
+	}
+}
+
+// TestUpdate_NonDefaultPathPreserved verifies that when a package has specs
+// installed into different non-default directories, each spec is reinstalled
+// to its original absolute path rather than being redirected to the first
+// spec's directory.
+func TestUpdate_NonDefaultPathPreserved(t *testing.T) {
+	// Two specs installed into two separate non-default directories.
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	binPathA := filepath.Join(dirA, "toolA")
+	binPathB := filepath.Join(dirB, "toolB")
+
+	pkg := &manifest.Package{
+		ID:        "example.com/owner/multitool",
+		Backend:   "github",
+		SourceURL: "https://example.com/owner/multitool",
+		Version:   "v1.0.0",
+		Specs: []manifest.InstallSpec{
+			{
+				AssetGlob: "toolA-linux-amd64",
+				LocalName: "toolA", // bare name; was installed to dirA
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+				InstalledFiles: []manifest.InstalledFile{
+					{LocalPath: binPathA, Checksums: map[string]string{}},
+				},
+			},
+			{
+				AssetGlob: "toolB-linux-amd64",
+				LocalName: "toolB", // bare name; was installed to dirB
+				Checksum:  manifest.ChecksumConfig{Strategy: "none"},
+				InstalledFiles: []manifest.InstalledFile{
+					{LocalPath: binPathB, Checksums: map[string]string{}},
+				},
+			},
+		},
+	}
+
+	// Create the placeholder files that the manifest claims are installed.
+	for _, p := range []string{binPathA, binPathB} {
+		if err := os.WriteFile(p, []byte("old-binary"), 0755); err != nil {
+			t.Fatalf("create installed binary %q: %v", p, err)
+		}
+	}
+
+	checkResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "toolA-linux-amd64", URL: "https://example.com/toolA-linux-amd64"},
+			{Name: "toolB-linux-amd64", URL: "https://example.com/toolB-linux-amd64"},
+		},
+	}
+	resolveResolution := &backend.Resolution{
+		Version: "v1.1.0",
+		Assets: []backend.Asset{
+			{Name: "toolA-linux-amd64", URL: "https://example.com/toolA-linux-amd64"},
+			{Name: "toolB-linux-amd64", URL: "https://example.com/toolB-linux-amd64"},
+		},
+	}
+
+	// newUpdateManager patches only the first spec's InstalledFiles; since we
+	// set InstalledFiles ourselves above (and pass binPath=""), use it directly.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	fetcher := &MockFetcher{
+		FetchFn: func(ctx context.Context, u string) ([]byte, error) {
+			return []byte("new-binary"), nil
+		},
+	}
+	extractor := &MockExtractor{ExtractFn: noExtract}
+	verifier := &MockVerifier{
+		VerifyFn:  func(ctx context.Context, data []byte, expected map[string]string) error { return nil },
+		ComputeFn: defaultCompute,
+	}
+
+	mb := &MockBackend{
+		TypeFn:      func() string { return pkg.Backend },
+		CanHandleFn: func(u *url.URL) bool { return true },
+		ResolveFn: func(ctx context.Context, sourceURL *url.URL, opts backend.ResolveOptions) (*backend.Resolution, error) {
+			return resolveResolution, nil
+		},
+		CheckFn: func(ctx context.Context, p *manifest.Package) (*backend.Resolution, error) {
+			return checkResolution, nil
+		},
+	}
+	reg := backend.NewRegistry()
+	reg.Register(mb)
+
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	if err := os.MkdirAll(libDir, 0700); err != nil {
+		t.Fatalf("create libDir: %v", err)
+	}
+	writeManifest(t, libDir, pkg)
+
+	m := New(reg, fetcher, extractor, verifier, libDir)
+
+	ctx := context.Background()
+	results, err := m.Update(ctx, UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+
+	if len(results) != 1 || !results[0].Updated {
+		t.Fatalf("expected 1 updated result")
+	}
+
+	// Both tools must be updated in-place at their original paths.
+	for _, p := range []string{binPathA, binPathB} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("file not found at original path %q: %v", p, err)
+			continue
+		}
+		if string(data) != "new-binary" {
+			t.Errorf("file at %q has content %q, want %q", p, string(data), "new-binary")
+		}
+	}
+
+	// No files must have been created under dirA for toolB (the bug scenario).
+	wrongPath := filepath.Join(dirA, "toolB")
+	if _, err := os.Stat(wrongPath); err == nil {
+		t.Errorf("toolB was incorrectly written to dirA (%q); bug not fixed", wrongPath)
+	}
+}
+
+// ========== Status tests ==========
+
+// newStatusManager creates a manager with a mock backend that reports the given
+// checkResolution, and writes the provided manifest to libDir.
+func newStatusManager(
+	t *testing.T,
+	pkg *manifest.Package,
+	checkResolution *backend.Resolution,
+) (Manager, string) {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	mb := &MockBackend{
+		TypeFn:      func() string { return pkg.Backend },
+		CanHandleFn: func(u *url.URL) bool { return true },
+		ResolveFn: func(ctx context.Context, sourceURL *url.URL, opts backend.ResolveOptions) (*backend.Resolution, error) {
+			return checkResolution, nil
+		},
+		CheckFn: func(ctx context.Context, p *manifest.Package) (*backend.Resolution, error) {
+			return checkResolution, nil
+		},
+	}
+
+	reg := backend.NewRegistry()
+	reg.Register(mb)
+
+	libDir := filepath.Join(home, ".local", "share", "binmgr")
+	if err := os.MkdirAll(libDir, 0700); err != nil {
+		t.Fatalf("create libDir: %v", err)
+	}
+	writeManifest(t, libDir, pkg)
+
+	m := New(reg, &MockFetcher{}, &MockExtractor{}, &MockVerifier{}, libDir)
+	return m, home
+}
+
+// TestStatus_UpdateAvailable verifies UpdateAvailable is true when the backend
+// reports a newer version.
+func TestStatus_UpdateAvailable(t *testing.T) {
+	pkg := &manifest.Package{
+		ID:      "example.com/owner/mytool",
+		Backend: "github",
+		Version: "v1.0.0",
+	}
+	checkResolution := &backend.Resolution{Version: "v1.1.0"}
+
+	m, _ := newStatusManager(t, pkg, checkResolution)
+
+	ctx := context.Background()
+	results, err := m.Status(ctx, nil)
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if !r.UpdateAvailable {
+		t.Errorf("expected UpdateAvailable=true, got false")
+	}
+	if r.InstalledVersion != "v1.0.0" {
+		t.Errorf("InstalledVersion = %q, want %q", r.InstalledVersion, "v1.0.0")
+	}
+	if r.LatestVersion != "v1.1.0" {
+		t.Errorf("LatestVersion = %q, want %q", r.LatestVersion, "v1.1.0")
+	}
+}
+
+// TestStatus_NoUpdateAvailable verifies UpdateAvailable is false when the
+// backend reports the same version.
+func TestStatus_NoUpdateAvailable(t *testing.T) {
+	pkg := &manifest.Package{
+		ID:      "example.com/owner/mytool",
+		Backend: "github",
+		Version: "v1.0.0",
+	}
+	checkResolution := &backend.Resolution{Version: "v1.0.0"}
+
+	m, _ := newStatusManager(t, pkg, checkResolution)
+
+	ctx := context.Background()
+	results, err := m.Status(ctx, nil)
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].UpdateAvailable {
+		t.Errorf("expected UpdateAvailable=false when up to date, got true")
+	}
+}
+
+// TestStatus_PinnedFlagPropagated verifies that the Pinned field from the
+// manifest is reflected in the StatusResult.
+func TestStatus_PinnedFlagPropagated(t *testing.T) {
+	pkg := &manifest.Package{
+		ID:      "example.com/owner/mytool",
+		Backend: "github",
+		Version: "v1.0.0",
+		Pinned:  true,
+	}
+	checkResolution := &backend.Resolution{Version: "v1.0.0"}
+
+	m, _ := newStatusManager(t, pkg, checkResolution)
+
+	ctx := context.Background()
+	results, err := m.Status(ctx, nil)
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Pinned {
+		t.Errorf("expected Pinned=true, got false")
+	}
+}
