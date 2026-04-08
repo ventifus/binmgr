@@ -14,9 +14,9 @@ import (
 
 func TestIDToFilename(t *testing.T) {
 	tests := []struct {
-		name  string
-		id    string
-		want  string
+		name string
+		id   string
+		want string
 	}{
 		{
 			name: "plain id unchanged",
