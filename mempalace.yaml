@@ -4,6 +4,8 @@ rooms:
   description: Files from cmd/
 - name: pkg
   description: Files from pkg/
+- name: documentation
+  description: Files from docs/
 - name: backend
   description: Files from backend/
 - name: general
