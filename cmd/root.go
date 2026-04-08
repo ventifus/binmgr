@@ -23,19 +23,23 @@ import (
 	"github.com/apex/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/ventifus/binmgr/pkg/backend"
+	"github.com/ventifus/binmgr/pkg/extract"
+	"github.com/ventifus/binmgr/pkg/fetch"
+	"github.com/ventifus/binmgr/pkg/manifest"
+	"github.com/ventifus/binmgr/pkg/manager"
+	"github.com/ventifus/binmgr/pkg/verify"
 )
 
 var cfgFile string
 var loglevel string
+var mgr manager.Manager
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "binmgr",
 	Short: "binmgr installs binaries from various places and can keep them updated",
 	Long:  `binmgr installs binaries from various places and can keep them updated`,
-	// Uncomment the following line if your bare application
-	// has an action associated with it:
-	// Run: func(cmd *cobra.Command, args []string) { },
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -48,21 +52,26 @@ func Execute() {
 	}
 }
 
+func buildRegistry() *backend.Registry {
+	r := backend.NewRegistry()
+	r.Register(backend.NewGitHubBackend())
+	r.Register(backend.NewKubeBackend())
+	r.Register(backend.NewShasumBackend())
+	return r
+}
+
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.binmgr.yaml)")
 	rootCmd.PersistentFlags().StringVar(&loglevel, "loglevel", "warn", "Log level")
-	//loglevel := cmd.Flag("loglevel").Value.String()
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	log.Debug("initialized")
+	mgr = manager.New(
+		buildRegistry(),
+		fetch.NewFetcher(),
+		extract.NewExtractor(),
+		verify.NewVerifier(),
+		manifest.LibDir(),
+	)
 }
 
 // initConfig reads in config file and ENV variables if set.
