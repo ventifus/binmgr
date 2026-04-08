@@ -1,158 +1,131 @@
 package backend
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
-	"github.com/apex/log"
+	"github.com/ventifus/binmgr/pkg/manifest"
 )
 
-// Installs files by starting with a fixed url to a shasum manifest that looks like
-//    f24ea6a5d24b0cf44a215544f4df21972872971ea2387ca966a20aeed38f2cd8  ccoctl-linux-4.14.1.tar.gz
-//	  f17c71622d9a07ef148e23f4eb400af14cb34c2a6bba3b9d9fed53030420f70e  openshift-client-linux-4.14.1.tar.gz
-//    75228b51ffdeb6b85dcbb63e1532ea05c1b3c43308dd8b5c3598a0a73f4515ab  openshift-client-linux-arm64-4.14.1.tar.gz
-
-func InstallShasumUrl(ctx context.Context, u *url.URL, fileGlob string, outFile string) error {
-	csums, err := GetChecksumUrl(nil, u.String())
-	if err != nil {
-		log.WithError(err).Errorf("failed to get checksum file")
-		return err
-	}
-	m := NewBinmgrManifest()
-	m.Type = "shasumurl"
-	if !path.IsAbs(outFile) {
-		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", outFile)
-	}
-	m.Name = u.String()
-	m.ManifestFileName = fmt.Sprintf("shasumurl_%s", strings.ReplaceAll(u.String(), "/", "_"))
-	m.LatestRemoteUrl = u.String()
-
-	for _, f := range csums {
-		t, err := filepath.Match(fileGlob, f.Name)
-		if err != nil {
-			log.WithField("fileGlob", fileGlob).WithError(err).Errorf("failed to match fileglob")
-			return err
-		}
-		if t {
-			a := NewArtifact()
-			uRel, err := url.Parse(f.Name)
-			if err != nil {
-				return err
-			}
-
-			a.RemoteFile = u.ResolveReference(uRel).String()
-			a.FromGlob = fileGlob
-			m.Artifacts = append(m.Artifacts, a)
-			fmt.Printf("Installing %s from %s\n", path.Base(outFile), a.RemoteFile)
-
-			file, err := DownloadFile(ctx, nil, a)
-			if err != nil {
-				log.WithError(err).Error("failed to read response data")
-				return err
-			}
-			err = InstallFile(a, file, outFile, a.FromGlob)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return m.SaveManifest()
+type shasumBackend struct {
+	client *http.Client
 }
 
-func UpdateShasumUrl(ctx context.Context, m *BinmgrManifest) error {
-	csums, err := GetChecksumUrl(nil, m.LatestRemoteUrl)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Package %s\n", m.Name)
-	updates := false
-	for _, a := range m.Artifacts {
-		for _, c := range csums {
-			t, err := path.Match(a.FromGlob, c.Name)
-			if err != nil {
-				return err
-			}
-			if t {
-				uu, err := url.Parse(m.LatestRemoteUrl)
-				if err != nil {
-					return err
-				}
-				uRel, err := url.Parse(c.Name)
-				if err != nil {
-					return err
-				}
-				remoteFile := uu.ResolveReference(uRel).String()
-				if a.RemoteFile != remoteFile {
-					updates = true
-					fmt.Printf("  upgrade %s -> %s\n", path.Base(a.RemoteFile), path.Base(remoteFile))
-					a.RemoteFile = remoteFile
-					file, err := DownloadFile(ctx, nil, a)
-					if err != nil {
-						log.WithError(err).Error("failed to read response data")
-						return err
-					}
-					for _, ia := range a.InnerArtifacts {
-						fmt.Printf("    - %s\n", ia.LocalFile)
-						err = InstallFile(a, file, ia.LocalFile, ia.FromGlob)
-						if err != nil {
-							return err
-						}
-					}
-					if a.LocalFile != "" {
-						fmt.Printf("    - %s\n", a.LocalFile)
-						err = InstallFile(a, file, a.LocalFile, a.FromGlob)
-						if err != nil {
-							return err
-						}
-					}
-				}
-			}
-		}
-	}
-	if updates {
-		return m.SaveManifest()
-	}
-	fmt.Println("  no update needed")
-	return nil
+// NewShasumBackend returns a Backend for sha256sum.txt-based package sources.
+func NewShasumBackend() Backend {
+	return &shasumBackend{client: &http.Client{}}
 }
 
-func ShasumUrlStatus(ctx context.Context, m *BinmgrManifest) error {
-	csums, err := GetChecksumUrl(nil, m.LatestRemoteUrl)
+// CanHandle always returns false; this backend requires explicit --type shasumurl.
+func (s *shasumBackend) CanHandle(u *url.URL) bool {
+	return false
+}
+
+// Type returns the backend type string.
+func (s *shasumBackend) Type() string {
+	return "shasumurl"
+}
+
+// Resolve fetches the sha256sum.txt at sourceURL, hashes its content to produce
+// a version, and parses each line into an Asset with a resolved download URL and
+// the embedded checksum.
+func (s *shasumBackend) Resolve(ctx context.Context, sourceURL *url.URL, opts ResolveOptions) (*Resolution, error) {
+	content, err := s.fetchURL(ctx, sourceURL.String())
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("shasumurl: fetch %s: %w", sourceURL, err)
 	}
-	fmt.Printf("Package %s\n", m.Name)
-	updates := false
-	for _, a := range m.Artifacts {
-		for _, c := range csums {
-			t, err := path.Match(a.FromGlob, c.Name)
-			if err != nil {
-				return err
-			}
-			if t {
-				uu, err := url.Parse(m.LatestRemoteUrl)
-				if err != nil {
-					return err
-				}
-				uRel, err := url.Parse(c.Name)
-				if err != nil {
-					return err
-				}
-				remoteFile := uu.ResolveReference(uRel).String()
-				if a.RemoteFile != remoteFile {
-					fmt.Printf("  upgrade %s -> %s\n", path.Base(a.RemoteFile), path.Base(remoteFile))
-					updates = true
-				}
-			}
+
+	version := fmt.Sprintf("%x", sha256.Sum256(content))
+
+	assets, err := parseShasumFile(content, sourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("shasumurl: parse %s: %w", sourceURL, err)
+	}
+
+	return &Resolution{
+		Version: version,
+		Assets:  assets,
+	}, nil
+}
+
+// Check re-fetches the sha256sum.txt and returns a Resolution whose Version is
+// the SHA-256 hex of the current file content. The caller compares this to
+// pkg.Version to detect updates.
+func (s *shasumBackend) Check(ctx context.Context, pkg *manifest.Package) (*Resolution, error) {
+	content, err := s.fetchURL(ctx, pkg.SourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("shasumurl: check fetch %s: %w", pkg.SourceURL, err)
+	}
+
+	version := fmt.Sprintf("%x", sha256.Sum256(content))
+	return &Resolution{Version: version}, nil
+}
+
+// fetchURL performs an HTTP GET and returns the response body as bytes.
+func (s *shasumBackend) fetchURL(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// parseShasumFile parses a sha256sums-format file (lines of "{hex}  {filename}")
+// and builds an Asset list. Blank lines and lines starting with '#' are skipped.
+func parseShasumFile(content []byte, sourceURL *url.URL) ([]Asset, error) {
+	dirPath := path.Dir(sourceURL.Path)
+	var assets []Asset
+
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+
+		// Standard sha256sums format: exactly two spaces between digest and filename.
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		hexDigest := strings.TrimSpace(parts[0])
+		filename := strings.TrimSpace(parts[1])
+		if hexDigest == "" || filename == "" {
+			continue
+		}
+
+		assetURL := url.URL{
+			Scheme: sourceURL.Scheme,
+			Host:   sourceURL.Host,
+			Path:   path.Join(dirPath, filename),
+		}
+
+		assets = append(assets, Asset{
+			Name: filename,
+			URL:  assetURL.String(),
+			Checksums: map[string]string{
+				"sha-256": hexDigest,
+			},
+		})
 	}
-	if !updates {
-		fmt.Println("  no update needed")
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
-	return nil
+	return assets, nil
 }
