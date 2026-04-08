@@ -34,7 +34,7 @@ just test-pkg pkg/backend
 
 Run specific test:
 ```bash
-just test-one pkg/backend TestNewBinmgrManifest
+just test-one pkg/manager TestInstall
 ```
 
 Generate HTML coverage report:
@@ -75,73 +75,118 @@ just --list
 
 ## Architecture
 
+The codebase uses a layered design: stateless Backend adapters → Manager orchestration → independent utility packages.
+
+### Package Structure
+
+```
+cmd/           CLI parsing, user-facing output, wiring
+pkg/backend/   Backend interface and implementations (github, shasumurl, kubeurl)
+pkg/manager/   Orchestration: install/update/status/list/uninstall lifecycle
+pkg/manifest/  Manifest schema (Package/InstallSpec), storage, and loading
+pkg/fetch/     HTTP downloading with progress reporting
+pkg/extract/   In-memory archive decompression and file extraction
+pkg/verify/    Checksum computation and verification
+```
+
 ### Command Structure (cmd/)
 
 Uses Cobra for CLI commands. Each command is in its own file:
-- `root.go` - Entry point, config initialization, sets up viper to read from `~/.binmgr.yaml`
-- `install.go` - Installs binaries, auto-detects backend type from URL
-- `update.go` - Updates installed binaries to latest versions
-- `status.go` - Checks if installed binaries have updates available
-- `list.go` - Lists all installed binaries
-- `uninstall.go` - Removes installed binaries
+- `root.go` — Entry point, wires Manager with all dependencies via `manager.New()`
+- `install.go` — Parses `URL[@VERSION]`, `--file`, `--checksum`, `--dir`, `--type`, `--pin`
+- `update.go` — Updates packages; `--pin`/`--unpin` flags
+- `status.go` — Checks for updates; exits 1 if any update available
+- `list.go` — Lists all installed packages with versions and file paths
+- `uninstall.go` — Removes installed packages
 
 ### Backend Package (pkg/backend/)
 
-Core logic for different package sources. Each backend type implements install/update/status operations:
+Each backend implements the `Backend` interface:
+
+```go
+type Backend interface {
+    Resolve(ctx context.Context, sourceURL *url.URL, opts ResolveOptions) (*Resolution, error)
+    Check(ctx context.Context, pkg *manifest.Package) (*Resolution, error)
+    Type() string
+    CanHandle(u *url.URL) bool
+}
+```
 
 **Backend Types:**
-- `github.go` - GitHub releases (auto-detected for github.com URLs)
-- `shasumurl.go` - Generic URLs with SHA256SUMS files
-- `kube.go` - Kubernetes releases from dl.k8s.io (auto-detected)
+- `github.go` — GitHub releases; auto-detected for `github.com` URLs; plain net/http with Bearer token from `~/.config/gh/hosts.yml`
+- `shasumurl.go` — Generic URLs with sha256sum.txt files; version = SHA-256 of file content; `CanHandle` always false (must use `--type shasumurl`)
+- `kube.go` — Kubernetes releases from `dl.k8s.io`; auto-detected; fetches version from stable pointer URL; `Resolution.Assets` is nil (manager constructs download URLs)
+- `registry.go` — Dispatches to backends by URL or explicit `--type`
 
-**Supporting Files:**
-- `manifest.go` - Defines `BinmgrManifest` struct that tracks installed binaries. Manifests are stored as JSON in `~/.local/share/binmgr/`
-- `installedfile.go` - Handles file downloads, extraction (tar.gz, zip, bzip2), and installation to target location
-- `shasums.go` - Checksum verification logic supporting multiple formats (sha256sums, per-asset checksums, multisum)
-- `url.go` - URL utilities
+**Resolution type:**
+```go
+type Resolution struct {
+    Version string
+    Assets  []Asset  // nil for kubeurl; manager constructs URLs directly
+}
+type Asset struct {
+    Name, URL  string
+    Checksums  map[string]string  // pre-populated by shasumurl backend
+}
+```
 
-### Manifest System
+### Manager Package (pkg/manager/)
 
-Each installed binary has a manifest JSON file in `~/.local/share/binmgr/` containing:
-- Package name and type (github/shasumurl/kubeurl)
-- Current version and remote URL
-- List of artifacts (downloaded files) with checksums
-- Original command line used for installation (for updates)
+Single orchestrator; no layer calls another directly:
+- `manager.go` — `Manager` interface and `New()` constructor
+- `install.go` — Full install flow: resolve → select assets → fetch → verify → extract → write → save manifest
+- `update.go` — Parallel Check via WaitGroup; re-installs at new version
+- `status.go` — Parallel Check; returns `[]*StatusResult`
+- `checksum.go` — Strategy resolution: `auto`, `shared-file`, `per-asset`, `multisum`, `embedded`, `none`; parsers for sha256sums (text and binary mode) and multisum formats
+- `vars.go` — `ExpandVars(pattern, tag)`: substitutes `${TAG}` and `${VERSION}`
 
-This allows `update` to re-run the original install with new versions and `status` to check for newer releases.
+### Manifest Package (pkg/manifest/)
 
-### File Installation Flow
+- `package.go` — `Package`, `InstallSpec`, `ChecksumConfig`, `DownloadedAsset`, `InstalledFile` types with JSON tags
+- `store.go` — `Save`, `Load`, `LoadAll`, `Delete` (all take `dir string`; fall back to `LibDir()` when empty); `LibDir()` = `~/.local/share/binmgr/`
 
-1. Backend determines available assets/files from source
-2. User-specified glob pattern filters to desired file
-3. File is downloaded and checksum verified
-4. If archived (tar.gz, zip, bzip2), extract inner files
-5. Install to target location (default: `~/.local/bin/`)
-6. Save manifest for future updates
+### Data Flow (Install)
 
-### Checksum Verification
+1. Parse URL → dispatch to backend via registry
+2. `Resolve()` → `Resolution{Version, Assets}`
+3. Match `--file` ASSET_GLOB against assets
+4. Expand `${TAG}`/`${VERSION}` in traversal globs and local names
+5. Fetch asset bytes (in-memory)
+6. Resolve checksums per strategy (fetch checksum file if needed)
+7. `Verify()` asset bytes against expected checksums
+8. `Extract()` traversal globs from archive (in-memory)
+9. Write files to disk at 0755
+10. Save `manifest.Package` to `~/.local/share/binmgr/`
 
-Supports multiple checksum formats:
-- `sha256sums` - Standard SHA256SUMS file
-- `per_asset:sha256sum` - Individual .sha256sum files per asset
-- `per_asset:sha256` - Individual .sha256 files per asset
-- `multisum` - Files containing checksums with algorithm prefixes (e.g., "sha-256:")
-- `none` - Skip verification (not recommended)
+### Checksum Strategies (`--checksum`)
+
+| Strategy | Description |
+|----------|-------------|
+| `auto` | Search resolution assets for `SHA256SUMS`, `SHA256SUMS.txt`, `checksums.txt`, `checksums.sha256`, `*checksums*`, `*sha256*` |
+| `shared-file:GLOB` | Fetch named asset, parse as sha256sums, look up by filename |
+| `per-asset:SUFFIX` | Fetch `{assetURL}{suffix}`, parse as hex or sha256sums-format line |
+| `multisum[:DATA[:ORDER]]` | HashiCorp multisum format with separate data and order files |
+| `embedded:GLOB` | Extract checksum file from inside the archive |
+| `none` | Skip verification |
+
+sha256sums parser accepts both text mode (`hex  filename`) and binary mode (`hex *filename`).
+Verifier skips unknown hash algorithms; fails only on mismatches for algorithms it can compute.
+
+### Variable Substitution
+
+In `--file` specs and checksum file globs:
+- `${TAG}` — raw release tag (e.g. `v1.40.0`)
+- `${VERSION}` — tag with leading `v` stripped (e.g. `1.40.0`)
 
 ### URL Auto-Detection
 
-`install.go` automatically sets backend type based on URL:
 - `github.com/*` → github backend
 - `dl.k8s.io/*` → kubeurl backend
-- Others → use `--type` flag to specify
-
-### GitHub Authentication
-
-Attempts to use GitHub CLI (`gh`) config from `~/.config/gh/hosts.yml` for authenticated API requests (higher rate limits). Falls back to unauthenticated if not available.
+- Others → require `--type shasumurl` (or other future backend types)
 
 ## Development Notes
 
 - Logging uses apex/log with configurable levels via `--loglevel` flag (default: warn)
-- Configuration via viper reads from `~/.binmgr.yaml` if present
 - Progress bars use schollz/progressbar for download feedback
-- All backend operations use context with 5-minute timeout
+- All operations use a 5-minute context timeout
+- GitHub auth: reads Bearer token from `~/.config/gh/hosts.yml`; falls back to unauthenticated
