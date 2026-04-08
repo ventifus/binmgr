@@ -1,92 +1,200 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/ventifus/binmgr/pkg/backend"
+	"github.com/ventifus/binmgr/pkg/manager"
+	"github.com/ventifus/binmgr/pkg/manifest"
 )
 
-func TestListCommand_NoManifests(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "binmgr-test-")
+// mockManager implements manager.Manager with configurable function fields.
+type mockManager struct {
+	InstallFn   func(ctx context.Context, opts manager.InstallOptions) error
+	UpdateFn    func(ctx context.Context, opts manager.UpdateOptions) ([]*manager.UpdateResult, error)
+	StatusFn    func(ctx context.Context, packages []string) ([]*manager.StatusResult, error)
+	ListFn      func(ctx context.Context) ([]*manifest.Package, error)
+	UninstallFn func(ctx context.Context, packages []string) error
+}
+
+func (m *mockManager) Install(ctx context.Context, opts manager.InstallOptions) error {
+	return m.InstallFn(ctx, opts)
+}
+
+func (m *mockManager) Update(ctx context.Context, opts manager.UpdateOptions) ([]*manager.UpdateResult, error) {
+	return m.UpdateFn(ctx, opts)
+}
+
+func (m *mockManager) Status(ctx context.Context, packages []string) ([]*manager.StatusResult, error) {
+	return m.StatusFn(ctx, packages)
+}
+
+func (m *mockManager) List(ctx context.Context) ([]*manifest.Package, error) {
+	return m.ListFn(ctx)
+}
+
+func (m *mockManager) Uninstall(ctx context.Context, packages []string) error {
+	return m.UninstallFn(ctx, packages)
+}
+
+// captureStdout replaces os.Stdout with a pipe and returns a function that
+// restores os.Stdout and returns all bytes written during the capture.
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("os.Pipe: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
-
-	libPath := tmpDir + "/.local/share/binmgr/"
-	err = os.MkdirAll(libPath, 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := &cobra.Command{}
-	err = list(cmd, []string{})
-	if err != nil {
-		t.Errorf("list() failed with empty manifests: %v", err)
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+	return func() string {
+		w.Close()
+		var buf bytes.Buffer
+		io.Copy(&buf, r) //nolint:errcheck
+		r.Close()
+		return buf.String()
 	}
 }
 
-func TestListCommand_WithManifests(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "binmgr-test-")
-	if err != nil {
-		t.Fatal(err)
+func TestRunList(t *testing.T) {
+	tests := []struct {
+		name     string
+		packages []*manifest.Package
+		wantIn   []string
+		wantOut  []string // strings that must NOT appear
+	}{
+		{
+			name:     "no packages",
+			packages: []*manifest.Package{},
+			wantIn:   []string{},
+		},
+		{
+			name: "one package",
+			packages: []*manifest.Package{
+				{
+					ID:      "github.com/casey/just",
+					Version: "1.40.0",
+					Specs:   []manifest.InstallSpec{},
+				},
+			},
+			wantIn: []string{"github.com/casey/just", "1.40.0"},
+		},
+		{
+			name: "two packages",
+			packages: []*manifest.Package{
+				{
+					ID:      "github.com/casey/just",
+					Version: "1.40.0",
+					Specs:   []manifest.InstallSpec{},
+				},
+				{
+					ID:      "github.com/cli/cli",
+					Version: "2.50.0",
+					Specs:   []manifest.InstallSpec{},
+				},
+			},
+			wantIn: []string{
+				"github.com/casey/just", "1.40.0",
+				"github.com/cli/cli", "2.50.0",
+			},
+		},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := mgr
+			t.Cleanup(func() { mgr = orig })
 
-	libPath := tmpDir + "/.local/share/binmgr/"
-	err = os.MkdirAll(libPath, 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
+			mgr = &mockManager{
+				ListFn: func(ctx context.Context) ([]*manifest.Package, error) {
+					return tc.packages, nil
+				},
+			}
 
-	// Create test manifests
-	for i := 0; i < 3; i++ {
-		m := backend.NewBinmgrManifest()
-		m.Name = "test-package-" + string(rune('a'+i))
-		m.Type = "github"
-		m.ManifestFileName = "test-" + string(rune('a'+i)) + ".json"
-		m.CurrentVersion = "v1.0.0"
-		m.Properties["owner"] = "owner" + string(rune('a'+i))
-		m.Properties["repo"] = "repo" + string(rune('a'+i))
+			flush := captureStdout(t)
+			err := runList(&cobra.Command{}, []string{})
+			got := flush()
 
-		err = m.SaveManifest()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+			if err != nil {
+				t.Fatalf("runList returned error: %v", err)
+			}
 
-	cmd := &cobra.Command{}
-	err = list(cmd, []string{})
-	if err != nil {
-		t.Errorf("list() failed: %v", err)
+			for _, want := range tc.wantIn {
+				if !strings.Contains(got, want) {
+					t.Errorf("output missing %q\ngot:\n%s", want, got)
+				}
+			}
+		})
 	}
 }
 
-func TestListCommand_DirNotExist(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "binmgr-test-")
-	if err != nil {
-		t.Fatal(err)
+func TestRunList_InstalledFiles(t *testing.T) {
+	orig := mgr
+	t.Cleanup(func() { mgr = orig })
+
+	mgr = &mockManager{
+		ListFn: func(ctx context.Context) ([]*manifest.Package, error) {
+			return []*manifest.Package{
+				{
+					ID:      "github.com/casey/just",
+					Version: "1.40.0",
+					Specs: []manifest.InstallSpec{
+						{
+							InstalledFiles: []manifest.InstalledFile{
+								{LocalPath: "/home/user/.local/bin/just"},
+							},
+						},
+					},
+				},
+			}, nil
+		},
 	}
-	defer os.RemoveAll(tmpDir)
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	flush := captureStdout(t)
+	err := runList(&cobra.Command{}, []string{})
+	got := flush()
 
-	// Don't create the lib directory
-	cmd := &cobra.Command{}
-	err = list(cmd, []string{})
-	if err == nil {
-		t.Error("Expected error when lib directory doesn't exist")
+	if err != nil {
+		t.Fatalf("runList returned error: %v", err)
+	}
+
+	if !strings.Contains(got, "/home/user/.local/bin/just") {
+		t.Errorf("output missing installed file path\ngot:\n%s", got)
+	}
+}
+
+func TestRunList_PinnedMarker(t *testing.T) {
+	orig := mgr
+	t.Cleanup(func() { mgr = orig })
+
+	mgr = &mockManager{
+		ListFn: func(ctx context.Context) ([]*manifest.Package, error) {
+			return []*manifest.Package{
+				{
+					ID:      "github.com/casey/just",
+					Version: "1.40.0",
+					Pinned:  true,
+					Specs:   []manifest.InstallSpec{},
+				},
+			}, nil
+		},
+	}
+
+	flush := captureStdout(t)
+	err := runList(&cobra.Command{}, []string{})
+	got := flush()
+
+	if err != nil {
+		t.Fatalf("runList returned error: %v", err)
+	}
+
+	if !strings.Contains(got, "[pinned]") {
+		t.Errorf("output missing [pinned] marker\ngot:\n%s", got)
 	}
 }
