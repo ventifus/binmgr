@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/ventifus/binmgr/pkg/backend"
 	"github.com/ventifus/binmgr/pkg/extract"
@@ -49,9 +48,10 @@ type ChecksumOpts struct {
 
 // UpdateOptions carries parameters for an update operation.
 type UpdateOptions struct {
-	Packages []PackageTarget // empty = all non-pinned packages
-	Pin      bool
-	Unpin    bool
+	Packages  []PackageTarget // empty = all non-pinned packages
+	Pin       bool
+	Unpin     bool
+	OnUpgrade func(id, oldVersion, newVersion string) // called before each install
 }
 
 // PackageTarget identifies a package and optional target version for update.
@@ -66,6 +66,7 @@ type UpdateResult struct {
 	OldVersion string
 	NewVersion string
 	Updated    bool
+	Err        error // non-nil if the install failed; package was skipped
 }
 
 // StatusResult reports the current and available versions for one package.
@@ -103,13 +104,5 @@ func New(
 }
 
 // Install is implemented in install.go.
-
-// Update is not yet implemented.
-func (m *mgr) Update(_ context.Context, _ UpdateOptions) ([]*UpdateResult, error) {
-	return nil, fmt.Errorf("not yet implemented")
-}
-
-// Status is not yet implemented.
-func (m *mgr) Status(_ context.Context, _ []string) ([]*StatusResult, error) {
-	return nil, fmt.Errorf("not yet implemented")
-}
+// Update is implemented in update.go.
+// Status is implemented in status.go.
