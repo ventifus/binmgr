@@ -1,103 +1,201 @@
-/*
-Copyright © 2023 NAME HERE <EMAIL ADDRESS>
-*/
 package cmd
 
 import (
 	"context"
 	"fmt"
-	"net/url"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/apex/log"
-	"github.com/go-errors/errors"
 	"github.com/spf13/cobra"
-	"github.com/ventifus/binmgr/pkg/backend"
-	"golang.org/x/exp/slices"
+	"github.com/ventifus/binmgr/pkg/manager"
 )
 
-// installCmd represents the install command
 var installCmd = &cobra.Command{
-	Use:   "install [URL]",
-	Short: "Installs a binary",
-	Long:  `Installs binaries found at one or more URLs.`,
-	Args:  installArgs,
-	RunE:  install,
-}
-
-func getPackageTypes() []string {
-	return []string{"github", "tarball", "shasumurl", "kubefile"}
-}
-
-func installArgs(cmd *cobra.Command, args []string) error {
-	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
-		log.WithError(err).Error("invalid number of arguments")
-		return err
-	}
-	if val := cmd.Flag("type").Value.String(); !slices.Contains(getPackageTypes(), val) {
-		log.Error("unsupported type")
-		return errors.Errorf("unsupported type %s", val)
-	}
-	if val := strings.Split(cmd.Flag("checksumtype").Value.String(), "!")[0]; !slices.Contains(backend.ChecksumTypes(), val) {
-		log.Error("unsupported checksum type")
-		return errors.Errorf("unsupported checksum type %s", val)
-	}
-	return nil
-}
-
-func install(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
-	defer cancel()
-	fileGlob := cmd.Flag("file").Value.String()
-	outFile := cmd.Flag("outfile").Value.String()
-	remoteType := cmd.Flag("type").Value.String()
-	checksumType := cmd.Flag("checksumtype").Value.String()
-	remoteUrlHttps := args[0]
-	if !strings.Contains(remoteUrlHttps, "://") {
-		remoteUrlHttps = fmt.Sprintf("https://%s", remoteUrlHttps)
-	}
-	remoteUrl, err := url.Parse(remoteUrlHttps)
-	if err != nil {
-		log.WithError(err).Error("failed to parse url")
-		return err
-	}
-	if remoteUrl.Host == "github.com" {
-		log.WithField("remoteUrl", remoteUrl).WithField("originalRemoteType", remoteType).Debug("setting remote type to github")
-		remoteType = "github"
-	}
-	if remoteUrl.Host == "dl.k8s.io" {
-		log.WithField("remoteUrl", remoteUrl).WithField("originalRemoteType", remoteType).Debug("setting remote type to kubeurl")
-		remoteType = "kubeurl"
-	}
-
-	log := log.WithFields(log.Fields{
-		"remoteUrl":  remoteUrl,
-		"remoteType": remoteType,
-		"fileGlob":   fileGlob,
-		"outFile":    outFile,
-	})
-	log.Debug("attempting install")
-
-	switch remoteType {
-	case "github":
-		return backend.InstallGithub(ctx, remoteUrl, fileGlob, outFile, checksumType)
-	case "kubeurl":
-		return backend.InstallKubeFile(ctx, remoteUrl, fileGlob, outFile)
-	case "shasumurl":
-		return backend.InstallShasumUrl(ctx, remoteUrl, fileGlob, outFile)
-	}
-
-	return errors.Errorf("unsupported type")
+	Use:   "install URL[@VERSION]",
+	Short: "Download and install a package",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runInstall,
 }
 
 func init() {
 	rootCmd.AddCommand(installCmd)
-	installCmd.Flags().String("type", "github", "Type of package")
-	installCmd.Flags().String("file", "", "If there are multiple files, select file name to install. Separate inner file names with an exclamation point `!`.")
-	installCmd.Flags().String("outfile", "", "The local file name")
-	installCmd.Flags().String("xform", "", "Transform file names with regex")
-	installCmd.Flags().String("checksumtype", "sha256sums", fmt.Sprintf(
-		"Type of checksum to use [%s]", strings.Join(backend.ChecksumTypes(), ","),
-	))
+	installCmd.Flags().StringArrayP("file", "f", nil, "Install spec: ASSET_GLOB[!TRAVERSAL_GLOB...][@LOCAL_NAME] (repeatable; at least one required)")
+	installCmd.Flags().String("checksum", "auto", "Checksum strategy (auto|none|shared-file:GLOB|per-asset:SUFFIX|multisum[:DATA[:ORDER]]|embedded:GLOB)")
+	installCmd.Flags().String("dir", "", "Default install directory (default: ~/.local/bin/)")
+	installCmd.Flags().String("type", "", "Backend override: github | shasumurl | kubeurl")
+	installCmd.Flags().Bool("pin", false, "Pin this package to the installed version")
+}
+
+// parseURL extracts the URL and optional version from a "URL[@VERSION]" argument.
+// The @VERSION suffix is recognised only when the part after the last @ is non-empty
+// and contains no '/'.
+func parseURL(arg string) (rawURL, version string) {
+	idx := strings.LastIndex(arg, "@")
+	if idx >= 0 {
+		after := arg[idx+1:]
+		if after != "" && !strings.Contains(after, "/") {
+			version = after
+			arg = arg[:idx]
+		}
+	}
+	rawURL = arg
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "https://" + rawURL
+	}
+	return rawURL, version
+}
+
+// parseFileSpec parses a single --file value: ASSET_GLOB[!TRAVERSAL_GLOB...][@LOCAL_NAME]
+func parseFileSpec(spec string) (assetGlob string, traversalGlobs []string, localName string) {
+	// Split on last '@' to extract optional LocalName.
+	if idx := strings.LastIndex(spec, "@"); idx >= 0 {
+		localName = spec[idx+1:]
+		spec = spec[:idx]
+	}
+
+	// Expand ~/ in localName.
+	if strings.HasPrefix(localName, "~/") {
+		home := os.Getenv("HOME")
+		localName = home + localName[1:]
+	}
+
+	// Split remainder on '!' to get AssetGlob and TraversalGlobs.
+	parts := strings.Split(spec, "!")
+	assetGlob = parts[0]
+	if len(parts) > 1 {
+		traversalGlobs = parts[1:]
+	}
+
+	return assetGlob, traversalGlobs, localName
+}
+
+// parseChecksumStrategy converts a --checksum flag value into a ChecksumOpts.
+func parseChecksumStrategy(value string) (manager.ChecksumOpts, error) {
+	parts := strings.SplitN(value, ":", 3)
+	strategy := parts[0]
+
+	switch strategy {
+	case "auto":
+		return manager.ChecksumOpts{Strategy: "auto"}, nil
+
+	case "none":
+		return manager.ChecksumOpts{Strategy: "none"}, nil
+
+	case "shared-file":
+		fileGlob := ""
+		if len(parts) >= 2 {
+			fileGlob = parts[1]
+		}
+		return manager.ChecksumOpts{Strategy: "shared-file", FileGlob: fileGlob}, nil
+
+	case "per-asset":
+		suffix := ""
+		if len(parts) >= 2 {
+			suffix = parts[1]
+		}
+		return manager.ChecksumOpts{Strategy: "per-asset", Suffix: suffix}, nil
+
+	case "multisum":
+		dataGlob := "checksums"
+		orderGlob := "checksums_hashes_order"
+		if len(parts) >= 2 && parts[1] != "" {
+			dataGlob = parts[1]
+		}
+		if len(parts) >= 3 && parts[2] != "" {
+			orderGlob = parts[2]
+		}
+		return manager.ChecksumOpts{Strategy: "multisum", FileGlob: dataGlob, OrderGlob: orderGlob}, nil
+
+	case "embedded":
+		traversalGlob := ""
+		if len(parts) >= 2 {
+			traversalGlob = parts[1]
+		}
+		return manager.ChecksumOpts{Strategy: "embedded", TraversalGlob: traversalGlob}, nil
+
+	default:
+		return manager.ChecksumOpts{}, fmt.Errorf(
+			"invalid checksum strategy %q: valid strategies are auto, none, shared-file:GLOB, per-asset:SUFFIX, multisum[:DATA[:ORDER]], embedded:GLOB",
+			value,
+		)
+	}
+}
+
+func runInstall(cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+	defer cancel()
+
+	// Parse URL[@VERSION].
+	sourceURL, version := parseURL(args[0])
+
+	// Parse --file flags.
+	fileSpecs, err := cmd.Flags().GetStringArray("file")
+	if err != nil {
+		return err
+	}
+	if len(fileSpecs) == 0 {
+		return fmt.Errorf("at least one --file flag is required")
+	}
+
+	// Parse --checksum.
+	checksumValue, err := cmd.Flags().GetString("checksum")
+	if err != nil {
+		return err
+	}
+	checksumOpts, err := parseChecksumStrategy(checksumValue)
+	if err != nil {
+		return err
+	}
+
+	// Parse --dir.
+	defaultDir, err := cmd.Flags().GetString("dir")
+	if err != nil {
+		return err
+	}
+	if defaultDir == "" {
+		defaultDir = os.Getenv("HOME") + "/.local/bin/"
+	} else if strings.HasPrefix(defaultDir, "~/") {
+		defaultDir = os.Getenv("HOME") + defaultDir[1:]
+	}
+
+	// Parse --type.
+	backendType, err := cmd.Flags().GetString("type")
+	if err != nil {
+		return err
+	}
+
+	// Parse --pin.
+	pin, err := cmd.Flags().GetBool("pin")
+	if err != nil {
+		return err
+	}
+
+	// Build SpecOpts for each --file.
+	specs := make([]manager.SpecOpts, 0, len(fileSpecs))
+	for _, raw := range fileSpecs {
+		assetGlob, traversalGlobs, localName := parseFileSpec(raw)
+		specs = append(specs, manager.SpecOpts{
+			AssetGlob:      assetGlob,
+			TraversalGlobs: traversalGlobs,
+			LocalName:      localName,
+			Checksum:       checksumOpts,
+		})
+	}
+
+	opts := manager.InstallOptions{
+		SourceURL:   sourceURL,
+		Version:     version,
+		Specs:       specs,
+		DefaultDir:  defaultDir,
+		BackendType: backendType,
+		Pin:         pin,
+	}
+
+	if err := mgr.Install(ctx, opts); err != nil {
+		return err
+	}
+
+	fmt.Printf("Installed %s\n", sourceURL)
+	return nil
 }
