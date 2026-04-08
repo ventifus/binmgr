@@ -18,7 +18,7 @@ import (
 func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 	// 1. Parse the source URL; prepend https:// if no scheme is present.
 	sourceURL := opts.SourceURL
-	if !strings.HasPrefix(sourceURL, "http") {
+	if !strings.Contains(sourceURL, "://") {
 		sourceURL = "https://" + sourceURL
 	}
 	parsedURL, err := url.Parse(sourceURL)
@@ -46,6 +46,7 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 	// 4. Determine package ID and handle kubeurl special case.
 	//    For kubeurl, Assets is nil; construct in-memory asset list from specs.
 	var pkgID string
+	var assets []backend.Asset
 	if resolution.Assets == nil {
 		// kubeurl: each spec names one binary path; build an asset per spec.
 		// The package ID is host + first spec's AssetGlob.
@@ -53,16 +54,16 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 			return fmt.Errorf("install: kubeurl backend requires at least one spec")
 		}
 		pkgID = parsedURL.Host + "/" + opts.Specs[0].AssetGlob
-		assets := make([]backend.Asset, 0, len(opts.Specs))
+		assets = make([]backend.Asset, 0, len(opts.Specs))
 		for _, spec := range opts.Specs {
 			assets = append(assets, backend.Asset{
 				Name: spec.AssetGlob,
-				URL:  fmt.Sprintf("https://%s/%s/%s", parsedURL.Host, resolution.Version, spec.AssetGlob),
+				URL:  fmt.Sprintf("https://%s/%s/%s", parsedURL.Host, resolution.Version, ExpandVars(spec.AssetGlob, resolution.Version)),
 			})
 		}
-		resolution.Assets = assets
 	} else {
 		pkgID = parsedURL.Host + parsedURL.Path
+		assets = resolution.Assets
 	}
 
 	// Normalised source URL stored in manifest (no query/fragment).
@@ -95,13 +96,13 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 
 		// Find matching asset for this spec's expanded glob.
 		var matched *backend.Asset
-		for j := range resolution.Assets {
-			ok, err := filepath.Match(expandedGlob, resolution.Assets[j].Name)
+		for j := range assets {
+			ok, err := filepath.Match(expandedGlob, assets[j].Name)
 			if err != nil {
 				return fmt.Errorf("install: spec %d: invalid asset glob %q: %w", i, expandedGlob, err)
 			}
 			if ok {
-				matched = &resolution.Assets[j]
+				matched = &assets[j]
 				break
 			}
 		}
@@ -166,9 +167,17 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 	// 8. For each spec, extract and write files.
 	defaultDir := opts.DefaultDir
 	if defaultDir == "" {
-		defaultDir = filepath.Join(os.Getenv("HOME"), ".local", "bin")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("install: resolve home directory: %w", err)
+		}
+		defaultDir = filepath.Join(home, ".local", "bin")
 	} else if strings.HasPrefix(defaultDir, "~/") {
-		defaultDir = filepath.Join(os.Getenv("HOME"), defaultDir[2:])
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("install: resolve home directory: %w", err)
+		}
+		defaultDir = filepath.Join(home, defaultDir[2:])
 	}
 
 	manifestSpecs := make([]manifest.InstallSpec, 0, len(opts.Specs))
@@ -190,7 +199,10 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 
 		var installedFiles []manifest.InstalledFile
 		for _, file := range files {
-			localPath := resolveLocalPath(w.spec.LocalName, file.SourcePath, w.asset.Name, defaultDir)
+			localPath, err := resolveLocalPath(w.spec.LocalName, file.SourcePath, w.asset.Name, defaultDir)
+			if err != nil {
+				return fmt.Errorf("install: resolve local path: %w", err)
+			}
 
 			if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 				return fmt.Errorf("install: create directory for %q: %w", localPath, err)
@@ -268,18 +280,20 @@ func (m *mgr) Install(ctx context.Context, opts InstallOptions) error {
 //  2. localName is a bare filename → join with defaultDir.
 //  3. localName is empty → use basename of sourcePath if non-empty, else basename
 //     of assetName; join with defaultDir.
-func resolveLocalPath(localName, sourcePath, assetName, defaultDir string) string {
-	home := os.Getenv("HOME")
-
+func resolveLocalPath(localName, sourcePath, assetName, defaultDir string) (string, error) {
 	if localName != "" {
 		if strings.HasPrefix(localName, "/") {
-			return localName
+			return localName, nil
 		}
 		if strings.HasPrefix(localName, "~/") {
-			return filepath.Join(home, localName[2:])
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("resolve home directory: %w", err)
+			}
+			return filepath.Join(home, localName[2:]), nil
 		}
 		// Bare filename: join with defaultDir.
-		return filepath.Join(defaultDir, localName)
+		return filepath.Join(defaultDir, localName), nil
 	}
 
 	// Empty localName: derive from source.
@@ -289,5 +303,5 @@ func resolveLocalPath(localName, sourcePath, assetName, defaultDir string) strin
 	} else {
 		base = filepath.Base(assetName)
 	}
-	return filepath.Join(defaultDir, base)
+	return filepath.Join(defaultDir, base), nil
 }

@@ -102,10 +102,7 @@ func New(
 	}
 }
 
-// Install is not yet implemented.
-func (m *mgr) Install(_ context.Context, _ InstallOptions) error {
-	return fmt.Errorf("not yet implemented")
-}
+// Install is implemented in install.go.
 
 // Update is not yet implemented.
 func (m *mgr) Update(_ context.Context, _ UpdateOptions) ([]*UpdateResult, error) {
