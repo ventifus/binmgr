@@ -6,157 +6,72 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
 	"strings"
 
-	"github.com/apex/log"
-	"github.com/go-errors/errors"
+	"github.com/ventifus/binmgr/pkg/manifest"
 )
 
-// Installs kubernetes components
+type kubeBackend struct {
+	client *http.Client
+}
 
-const kubeVersionUrl = "https://dl.k8s.io/release/stable.txt"
-
-func getUrlAsString(client *http.Client, u string) (string, error) {
-	log := log.WithField("url", u)
-	ret := ""
-	if client == nil {
-		client = &http.Client{}
+func NewKubeBackend() Backend {
+	return &kubeBackend{
+		client: &http.Client{},
 	}
-	resp, err := client.Get(u)
+}
+
+func (k *kubeBackend) CanHandle(u *url.URL) bool {
+	return u.Host == "dl.k8s.io"
+}
+
+func (k *kubeBackend) Type() string {
+	return "kubeurl"
+}
+
+func (k *kubeBackend) fetchVersion(ctx context.Context, versionURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionURL, nil)
 	if err != nil {
-		log.WithError(err).Errorf("failed to get url")
-		return ret, err
+		return "", fmt.Errorf("kubeurl: create request: %w", err)
+	}
+	req.Header.Set("User-Agent", "binmgr")
+
+	resp, err := k.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("kubeurl: fetch %s: %w", versionURL, err)
 	}
 	defer resp.Body.Close()
-	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get file")
-	if resp.StatusCode != 200 {
-		return ret, errors.Errorf("%s", resp.Status)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("kubeurl: fetch %s: unexpected status %s", versionURL, resp.Status)
 	}
+
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.WithError(err).Errorf("failed to read url")
-		return ret, err
+		return "", fmt.Errorf("kubeurl: read response from %s: %w", versionURL, err)
 	}
-	ret = string(b)
-	return ret, nil
+
+	return strings.TrimSpace(string(b)), nil
 }
 
-func InstallKubeFile(ctx context.Context, u *url.URL, fileGlob string, outFile string) error {
-	pathComponents := strings.Split(u.Path, "/")
-
-	m := NewBinmgrManifest()
-	m.Type = "kubeurl"
-	if outFile != "" && !path.IsAbs(outFile) {
-		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", outFile)
+func (k *kubeBackend) Resolve(ctx context.Context, sourceURL *url.URL, opts ResolveOptions) (*Resolution, error) {
+	if opts.Version != "" {
+		return &Resolution{Version: opts.Version, Assets: nil}, nil
 	}
-	m.Name = fmt.Sprintf("dl.k8s.io/.../%s", strings.Join(pathComponents[2:], "/"))
-	m.CurrentRemoteUrl = kubeVersionUrl
-	m.ManifestFileName = fmt.Sprintf("kubeurl_%s", strings.Join(pathComponents[2:], "_"))
 
-	kubeVersion, err := getUrlAsString(nil, kubeVersionUrl)
+	version, err := k.fetchVersion(ctx, sourceURL.String())
 	if err != nil {
-		return err
-	}
-	m.CurrentVersion = kubeVersion
-
-	pathComponents[1] = kubeVersion
-	u.Path = strings.Join(pathComponents, "/")
-	m.LatestRemoteUrl = u.String()
-
-	a := NewArtifact()
-	a.RemoteFile = u.String()
-	if outFile == "" {
-		a.LocalFile = pathComponents[len(pathComponents)-1]
-		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", a.LocalFile)
+		return nil, err
 	}
 
-	a.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
-	shasum, err := getUrlAsString(nil, a.ChecksumFile)
-	if err != nil {
-		log.WithError(err).Errorf("failed to get checksum")
-		return err
-	}
-	a.Checksums = map[string]string{AlgorithmSha256: shasum}
-
-	m.Artifacts = append(m.Artifacts, a)
-	fmt.Printf("Installing %s from %s\n", path.Base(outFile), a.RemoteFile)
-
-	file, err := DownloadFile(ctx, nil, a)
-	if err != nil {
-		log.WithError(err).Errorf("failed to download file")
-		return err
-	}
-	err = InstallFile(a, file, outFile, a.FromGlob)
-	if err != nil {
-		return err
-	}
-
-	return m.SaveManifest()
+	return &Resolution{Version: version, Assets: nil}, nil
 }
 
-func UpdateKubeUrl(ctx context.Context, m *BinmgrManifest) error {
-	kubeVersion, err := getUrlAsString(nil, kubeVersionUrl)
+func (k *kubeBackend) Check(ctx context.Context, pkg *manifest.Package) (*Resolution, error) {
+	version, err := k.fetchVersion(ctx, pkg.SourceURL)
 	if err != nil {
-		return err
-	}
-	updates := false
-	fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
-	if m.CurrentVersion != kubeVersion {
-		updates = true
-		m.CurrentVersion = kubeVersion
-		m.LatestRemoteUrl = kubeVersionUrl
-		for _, a := range m.Artifacts {
-			u, err := url.Parse(a.RemoteFile)
-			if err != nil {
-				log.WithError(err).WithField("RemoteFile", a.RemoteFile).Error("failed to parse RemoteFile url")
-				continue
-			}
-			pathComponents := strings.Split(u.Path, "/")
-			pathComponents[1] = kubeVersion
-			u.Path = strings.Join(pathComponents, "/")
-			remoteFile := u.String()
-			fmt.Printf("  upgrade %s -> %s\n", path.Base(a.RemoteFile), path.Base(remoteFile))
-			a.RemoteFile = remoteFile
-			a.ChecksumFile = fmt.Sprintf("%s.sha256", a.RemoteFile)
-			shasum, err := getUrlAsString(nil, a.ChecksumFile)
-			if err != nil {
-				log.WithError(err).Errorf("failed to get checksum")
-				return err
-			}
-			a.Checksums = map[string]string{AlgorithmSha256: shasum}
-			file, err := DownloadFile(ctx, nil, a)
-			if err != nil {
-				log.WithError(err).Errorf("failed to download file")
-				return err
-			}
-			fmt.Printf("    - %s\n", a.LocalFile)
-			err = InstallFile(a, file, a.LocalFile, a.FromGlob)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if updates {
-		return m.SaveManifest()
-	}
-	fmt.Println("  no update needed")
-	return nil
-}
-
-func KubeUrlStatus(ctx context.Context, m *BinmgrManifest) error {
-	kubeVersion, err := getUrlAsString(nil, kubeVersionUrl)
-	if err != nil {
-		return err
+		return nil, err
 	}
 
-	fmt.Printf("Package %s %s\n", m.Name, kubeVersion)
-	if kubeVersion != m.CurrentVersion {
-		fmt.Printf("  upgrade %s -> %s\n", m.CurrentVersion, kubeVersion)
-		return nil
-	}
-
-	fmt.Println("  no update needed")
-	return nil
+	return &Resolution{Version: version, Assets: nil}, nil
 }
