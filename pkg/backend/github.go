@@ -98,7 +98,7 @@ func parseGhConfig(f *os.File) (*GhConfig, error) {
 
 func newGithubClient() *github.Client {
 	// load oauth token from ~/.config/gh/hosts.yml if available
-	ctx := context.TODO()
+	ctx := context.Background()
 	var client *github.Client
 	f, err := os.Open(path.Join(os.Getenv("HOME"), ".config/gh/hosts.yml"))
 	if err != nil {
@@ -138,6 +138,9 @@ func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, out
 	log := log.WithField("url", githubUrl.String())
 
 	githubPath := strings.Split(githubUrl.Path, "/")
+	if len(githubPath) < 3 {
+		return fmt.Errorf("invalid github URL format: expected github.com/owner/repo")
+	}
 	owner := githubPath[1]
 	repo := githubPath[2]
 
@@ -347,10 +350,10 @@ func (g *GithubRepo) GetRelease(ctx context.Context, u []string) error {
 	if len(u) < 4 {
 		log.WithField("release", "latest").Debug("getting latest release")
 		release, resp, err = g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
-	} else if u[4] == "tag" {
+	} else if len(u) >= 6 && u[4] == "tag" {
 		log.WithField("release", u[5]).Debug("getting release tag")
 		release, resp, err = g.client.Repositories.GetReleaseByTag(ctx, g.owner, g.repo, u[5])
-	} else if u[4] == "id" {
+	} else if len(u) >= 6 && u[4] == "id" {
 		var rel int64
 		rel, err = strconv.ParseInt(u[5], 10, 64)
 		if err != nil {
@@ -358,8 +361,11 @@ func (g *GithubRepo) GetRelease(ctx context.Context, u []string) error {
 		}
 		log.WithField("release", rel).Debug("getting release id")
 		release, resp, err = g.client.Repositories.GetRelease(ctx, g.owner, g.repo, rel)
-	} else {
+	} else if len(u) >= 5 {
 		log.WithField("u[3]", u[4]).Error("unsupported release type")
+	} else {
+		log.WithField("release", "latest").Debug("getting latest release (fallback)")
+		release, resp, err = g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
 	}
 	if err != nil {
 		return err

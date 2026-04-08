@@ -60,6 +60,7 @@ func install(cmd *cobra.Command, args []string) error {
 	remoteUrl, err := url.Parse(remoteUrlHttps)
 	if err != nil {
 		log.WithError(err).Error("failed to parse url")
+		return err
 	}
 	if remoteUrl.Host == "github.com" {
 		log.WithField("remoteUrl", remoteUrl).WithField("originalRemoteType", remoteType).Debug("setting remote type to github")

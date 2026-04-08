@@ -1,0 +1,10 @@
+wing: binmgr
+rooms:
+- name: cmd
+  description: Files from cmd/
+- name: pkg
+  description: Files from pkg/
+- name: backend
+  description: Files from backend/
+- name: general
+  description: Files that don't fit other rooms

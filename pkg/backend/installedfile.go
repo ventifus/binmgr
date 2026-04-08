@@ -188,6 +188,7 @@ func InstallFile(artifact *Artifact, file []byte, localFile string, globs string
 					l.WithField("file", zfile.Name).WithError(err).Error("failed to open zip entry")
 					return err
 				}
+				defer zf.Close()
 				f, err := io.ReadAll(zf)
 				if err != nil {
 					l.WithField("file", zfile.Name).WithError(err).Error("failed to read zip entry")
@@ -222,6 +223,7 @@ func installBin(file []byte, localFile string) error {
 		log.WithError(err).WithField("path", localFile).Error(createFailed)
 		return err
 	}
+	defer f.Close()
 	_, err = io.Copy(f, bytes.NewReader(file))
 	if err != nil {
 		log.WithError(err).WithField("path", localFile).Error(copyFailed)

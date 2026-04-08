@@ -29,12 +29,16 @@ func status(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	for _, m := range manifests {
+		var err error
 		if m.Type == "github" {
-			backend.GithubStatus(ctx, m)
+			err = backend.GithubStatus(ctx, m)
 		} else if m.Type == "shasumurl" {
-			backend.ShasumUrlStatus(ctx, m)
+			err = backend.ShasumUrlStatus(ctx, m)
 		} else if m.Type == "kubeurl" {
-			backend.KubeUrlStatus(ctx, m)
+			err = backend.KubeUrlStatus(ctx, m)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil

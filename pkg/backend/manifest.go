@@ -59,8 +59,9 @@ func NewInnerArtifact() *InnerArtifact {
 
 func NewBinmgrManifest() *BinmgrManifest {
 	return &BinmgrManifest{
-		Cmdline:   os.Args[1:],
-		Artifacts: make([]*Artifact, 0),
+		Cmdline:    os.Args[1:],
+		Artifacts:  make([]*Artifact, 0),
+		Properties: make(map[string]string),
 	}
 }
 
@@ -104,8 +105,8 @@ func GetAllManifests() ([]*BinmgrManifest, error) {
 		log.WithError(err).Error("could not read lib dir")
 		return nil, err
 	}
-	manifests := make([]*BinmgrManifest, len(lib))
-	for i, de := range lib {
+	manifests := make([]*BinmgrManifest, 0, len(lib))
+	for _, de := range lib {
 		if !de.Type().IsRegular() {
 			continue
 		}
@@ -124,13 +125,14 @@ func GetAllManifests() ([]*BinmgrManifest, error) {
 			return nil, err
 		}
 
-		manifests[i] = &BinmgrManifest{}
-		err = json.Unmarshal(b, manifests[i])
+		m := &BinmgrManifest{}
+		err = json.Unmarshal(b, m)
 		if err != nil {
 			log.WithError(err).Error("could not unmarshal json")
 			return nil, err
 		}
-		manifests[i].ManifestFileName = path.Base(fileName)
+		m.ManifestFileName = path.Base(fileName)
+		manifests = append(manifests, m)
 	}
 	return manifests, nil
 }
