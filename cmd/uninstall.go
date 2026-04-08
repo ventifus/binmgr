@@ -1,34 +1,47 @@
 /*
-Copyright © 2023 NAME HERE <EMAIL ADDRESS>
+Copyright © 2023 Andrew Denton <ventifus@flying-snail.net>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
 )
 
-// uninstallCmd represents the uninstall command
 var uninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Uninstalls a binary",
-	Long:  `Deletes the binary and removes the binmgr configuration for it`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("uninstall called")
-	},
+	Use:   "uninstall PACKAGE...",
+	Short: "Remove an installed package",
+	Long:  `Delete all installed files for the named packages and remove their manifests.`,
+	Args:  cobra.MinimumNArgs(1),
+	RunE:  runUninstall,
+}
+
+func runUninstall(cmd *cobra.Command, args []string) error {
+	err := mgr.Uninstall(context.Background(), args)
+	if err != nil {
+		return err
+	}
+	for _, id := range args {
+		fmt.Printf("Removed %s\n", id)
+	}
+	return nil
 }
 
 func init() {
 	rootCmd.AddCommand(uninstallCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// uninstallCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// uninstallCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

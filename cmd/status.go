@@ -1,47 +1,60 @@
 /*
-Copyright © 2023 NAME HERE <EMAIL ADDRESS>
+Copyright © 2023 Andrew Denton <ventifus@flying-snail.net>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package cmd
 
 import (
 	"context"
-	"time"
+	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
-
-	"github.com/ventifus/binmgr/pkg/backend"
 )
 
-// uninstallCmd represents the uninstall command
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Checks for updates and prints if binaries need updating",
-	Long:  `Prints the status of each binary, indicating if updates are needed`,
-	RunE:  status,
+	Use:   "status [PACKAGE...]",
+	Short: "Report whether newer versions are available",
+	Long:  `Check installed packages for available updates. With no arguments, checks all installed packages.`,
+	Run:   runStatus,
 }
 
-func status(cmd *cobra.Command, args []string) error {
-	// log := log.WithField("command", "list")
-	ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
-	defer cancel()
-	manifests, err := backend.GetAllManifests()
+func runStatus(cmd *cobra.Command, args []string) {
+	results, err := mgr.Status(context.Background(), args)
 	if err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
-	for _, m := range manifests {
-		var err error
-		if m.Type == "github" {
-			err = backend.GithubStatus(ctx, m)
-		} else if m.Type == "shasumurl" {
-			err = backend.ShasumUrlStatus(ctx, m)
-		} else if m.Type == "kubeurl" {
-			err = backend.KubeUrlStatus(ctx, m)
+
+	anyUpdates := false
+	for _, result := range results {
+		pinnedStr := ""
+		if result.Pinned {
+			pinnedStr = "  [pinned]"
 		}
-		if err != nil {
-			return err
+		if result.UpdateAvailable {
+			anyUpdates = true
+			fmt.Printf("%-50s %-20s → %-20s%s\n", result.ID, result.InstalledVersion, result.LatestVersion, pinnedStr)
+		} else {
+			fmt.Printf("%-50s %-20s up to date%s\n", result.ID, result.InstalledVersion, pinnedStr)
 		}
 	}
-	return nil
+
+	if anyUpdates {
+		os.Exit(1)
+	}
 }
 
 func init() {

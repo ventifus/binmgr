@@ -1,101 +1,88 @@
 /*
-Copyright © 2023 NAME HERE <EMAIL ADDRESS>
+Copyright © 2023 Andrew Denton <ventifus@flying-snail.net>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package cmd
 
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
-	"github.com/apex/log"
 	"github.com/spf13/cobra"
-
-	"github.com/ventifus/binmgr/pkg/backend"
+	"github.com/ventifus/binmgr/pkg/manager"
 )
 
-// uninstallCmd represents the uninstall command
+var updatePin bool
+var updateUnpin bool
+
 var updateCmd = &cobra.Command{
-	Use:   "update [PACKAGE]",
-	Short: "Updates all installed binaries",
-	Long:  `Checks the status of each installed binary and updates each one to the latest version`,
-	RunE:  update,
+	Use:   "update [PACKAGE[@VERSION]...] [flags]",
+	Short: "Update installed packages to their latest versions",
+	Long:  `Update installed packages. With no arguments, updates all non-pinned packages. Named packages are always updated, even if pinned.`,
+	RunE:  runUpdate,
 }
 
-// func getInstalledPackages() []string {
-// 	manifests, err := backend.GetAllManifests()
-// 	if err != nil {
-// 		log.WithError(err).Error("failed to get installed packages")
-// 		return nil
-// 	}
-// 	var packages []string
-// 	for _, m := range manifests {
-// 		packages = append(packages, m.Name)
-// 	}
-// 	return packages
-// }
-
-// func updateArgs(cmd *cobra.Command, args []string) error {
-// 	if val := cmd.Flag("package").Value.String(); !slices.Contains(getInstalledPackages(), val) {
-// 		return errors.Errorf("package %s is not installed", val)
-// 	}
-// 	return nil
-// }
-
-func update(cmd *cobra.Command, args []string) error {
-	// log := log.WithField("command", "list")
-	ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
-	defer cancel()
-	if len(args) == 0 {
-		return updateAll(ctx)
+func runUpdate(cmd *cobra.Command, args []string) error {
+	if updatePin && updateUnpin {
+		return fmt.Errorf("cannot use --pin and --unpin together")
 	}
-	manifests, err := backend.GetAllManifests()
-	if err != nil {
-		return err
+	if (updatePin || updateUnpin) && len(args) == 0 {
+		return fmt.Errorf("--pin/--unpin require at least one package name")
 	}
-	for _, pkg := range args {
-		for _, m := range manifests {
-			if m.Name == pkg {
-				err = updatePackage(ctx, m)
-				if err != nil {
-					log.WithError(err).Debug("update package failed")
-					fmt.Printf("Error: %v\n", err)
-				}
+
+	var targets []manager.PackageTarget
+	for _, arg := range args {
+		idx := strings.LastIndex(arg, "@")
+		if idx >= 0 {
+			suffix := arg[idx+1:]
+			if len(suffix) > 0 && !strings.Contains(suffix, "/") {
+				targets = append(targets, manager.PackageTarget{
+					ID:      arg[:idx],
+					Version: suffix,
+				})
+				continue
 			}
 		}
+		targets = append(targets, manager.PackageTarget{ID: arg})
 	}
-	return nil
-}
 
-func updatePackage(ctx context.Context, m *backend.BinmgrManifest) error {
-	switch m.Type {
-	case "github":
-		return backend.UpdateGithub(ctx, m)
-	case "shasumurl":
-		return backend.UpdateShasumUrl(ctx, m)
-	case "kubeurl":
-		return backend.UpdateKubeUrl(ctx, m)
+	opts := manager.UpdateOptions{
+		Packages: targets,
+		Pin:      updatePin,
+		Unpin:    updateUnpin,
 	}
-	return nil
-}
 
-func updateAll(ctx context.Context) error {
-	manifests, err := backend.GetAllManifests()
+	results, err := mgr.Update(context.Background(), opts)
 	if err != nil {
 		return err
 	}
-	// w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0x0)
-	// defer w.Flush()
-	for _, m := range manifests {
-		err = updatePackage(ctx, m)
-		if err != nil {
-			log.WithError(err).Debug("update package failed")
-			fmt.Printf("Error: %v\n", err)
+
+	for _, result := range results {
+		if result.Updated {
+			fmt.Printf("%s  %s → %s\n", result.ID, result.OldVersion, result.NewVersion)
+		} else {
+			fmt.Printf("%s  %s  up to date\n", result.ID, result.OldVersion)
 		}
 	}
+
 	return nil
 }
 
 func init() {
 	rootCmd.AddCommand(updateCmd)
+	updateCmd.Flags().BoolVar(&updatePin, "pin", false, "Pin each named package at the version it is updated to")
+	updateCmd.Flags().BoolVar(&updateUnpin, "unpin", false, "Remove the pin from each named package, then update to latest")
 }

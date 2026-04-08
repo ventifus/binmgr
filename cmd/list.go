@@ -1,51 +1,58 @@
 /*
-Copyright © 2023 NAME HERE <EMAIL ADDRESS>
+Copyright © 2023 Andrew Denton <ventifus@flying-snail.net>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package cmd
 
 import (
 	"context"
 	"fmt"
-	"path"
-	"time"
+	"os"
 
 	"github.com/spf13/cobra"
-
-	"github.com/ventifus/binmgr/pkg/backend"
 )
 
-// uninstallCmd represents the uninstall command
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "Lists all installed binaries",
-	Long:  `Generates a list of all binaries and where they came from`,
-	RunE:  list,
+	Short: "Show all installed packages",
+	Long:  `List all installed packages, their versions, and installed file paths.`,
+	RunE:  runList,
 }
 
-func list(cmd *cobra.Command, args []string) error {
-	// log := log.WithField("command", "list")
-	_, cancel := context.WithTimeout(cmd.Context(), time.Minute*5)
-	defer cancel()
-	manifests, err := backend.GetAllManifests()
+func runList(cmd *cobra.Command, args []string) error {
+	packages, err := mgr.List(context.Background())
 	if err != nil {
 		return err
 	}
-	//w := tabwriter.NewWriter(os.Stdout, 0, 4, 4, ' ', 0x0)
-	//defer w.Flush()
-	for _, m := range manifests {
-		fmt.Printf("Package %s %s\n", m.Name, m.CurrentVersion)
-		for _, a := range m.Artifacts {
-			fmt.Printf("  %s\n", a.RemoteFile)
-			if a.Installed {
-				fmt.Printf("    - %s\n", path.Base(a.LocalFile))
-				//fmt.Fprintf(w, "%s\t%s\t%s\n", path.Base(a.LocalFile), m.CurrentVersion, m.Name)
-			}
-			for _, i := range a.InnerArtifacts {
-				fmt.Printf("    - %s\n", path.Base(i.LocalFile))
-				//fmt.Fprintf(w, "%s\t%s\t%s\n", path.Base(i.LocalFile), m.CurrentVersion, m.Name)
+
+	for i, pkg := range packages {
+		pinnedStr := ""
+		if pkg.Pinned {
+			pinnedStr = "  [pinned]"
+		}
+		fmt.Printf("%-50s %s%s\n", pkg.ID, pkg.Version, pinnedStr)
+		for _, spec := range pkg.Specs {
+			for _, f := range spec.InstalledFiles {
+				fmt.Fprintf(os.Stdout, "  %s\n", f.LocalPath)
 			}
 		}
+		if i < len(packages)-1 {
+			fmt.Println()
+		}
 	}
+
 	return nil
 }
 
