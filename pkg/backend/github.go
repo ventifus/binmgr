@@ -74,8 +74,8 @@ func (g *githubBackend) Type() string {
 
 // githubRelease is a minimal representation of the GitHub Releases API response.
 type githubRelease struct {
-	TagName string         `json:"tag_name"`
-	Assets  []githubAsset  `json:"assets"`
+	TagName string        `json:"tag_name"`
+	Assets  []githubAsset `json:"assets"`
 }
 
 type githubAsset struct {

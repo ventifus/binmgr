@@ -26,8 +26,8 @@ import (
 	"github.com/ventifus/binmgr/pkg/backend"
 	"github.com/ventifus/binmgr/pkg/extract"
 	"github.com/ventifus/binmgr/pkg/fetch"
-	"github.com/ventifus/binmgr/pkg/manifest"
 	"github.com/ventifus/binmgr/pkg/manager"
+	"github.com/ventifus/binmgr/pkg/manifest"
 	"github.com/ventifus/binmgr/pkg/verify"
 )
 

@@ -23,7 +23,7 @@ func contentVersion(content string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 }
 
-func newTestServer(t *testing.T, content string) *httptest.Server {
+func newShasumTestServer(t *testing.T, content string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -47,7 +47,7 @@ func TestShasumBackendType(t *testing.T) {
 }
 
 func TestShasumBackendResolve_AssetList(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -64,7 +64,7 @@ func TestShasumBackendResolve_AssetList(t *testing.T) {
 }
 
 func TestShasumBackendResolve_AssetNames(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -87,7 +87,7 @@ func TestShasumBackendResolve_AssetNames(t *testing.T) {
 }
 
 func TestShasumBackendResolve_AssetURLs(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -106,7 +106,7 @@ func TestShasumBackendResolve_AssetURLs(t *testing.T) {
 }
 
 func TestShasumBackendResolve_Checksums(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -134,7 +134,7 @@ func TestShasumBackendResolve_Checksums(t *testing.T) {
 }
 
 func TestShasumBackendResolve_Version(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -155,9 +155,9 @@ func TestShasumBackendResolve_ChangedContentGivesDifferentVersion(t *testing.T) 
 	content1 := "abc123  file-1.0.tar.gz\n"
 	content2 := "def456  file-2.0.tar.gz\n"
 
-	srv1 := newTestServer(t, content1)
+	srv1 := newShasumTestServer(t, content1)
 	defer srv1.Close()
-	srv2 := newTestServer(t, content2)
+	srv2 := newShasumTestServer(t, content2)
 	defer srv2.Close()
 
 	b := NewShasumBackend()
@@ -187,7 +187,7 @@ aabbcc  tool-v1.tar.gz
 # another comment
 ddeeff  tool-v2.tar.gz
 `
-	srv := newTestServer(t, content)
+	srv := newShasumTestServer(t, content)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -210,7 +210,7 @@ ddeeff  tool-v2.tar.gz
 }
 
 func TestShasumBackendCheck(t *testing.T) {
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -235,7 +235,7 @@ func TestShasumBackendCheck_DetectsChange(t *testing.T) {
 	newContent := "def456  file-2.0.tar.gz\n"
 
 	// Serve the new content.
-	srv := newTestServer(t, newContent)
+	srv := newShasumTestServer(t, newContent)
 	defer srv.Close()
 
 	b := NewShasumBackend()
@@ -257,7 +257,7 @@ func TestShasumBackendCheck_DetectsChange(t *testing.T) {
 func TestShasumBackendResolve_IgnoresVersionOpt(t *testing.T) {
 	// For shasumurl the version is a content hash; version pinning is not supported.
 	// Resolve with opts.Version set should return the current latest anyway.
-	srv := newTestServer(t, fixtureShaSumTxt)
+	srv := newShasumTestServer(t, fixtureShaSumTxt)
 	defer srv.Close()
 
 	b := NewShasumBackend()

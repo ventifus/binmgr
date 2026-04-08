@@ -22,10 +22,10 @@ type Manager interface {
 // InstallOptions carries parameters for an install operation.
 type InstallOptions struct {
 	SourceURL   string
-	Version     string       // from @VERSION suffix; empty = latest
+	Version     string // from @VERSION suffix; empty = latest
 	Specs       []SpecOpts
-	DefaultDir  string       // empty = ~/.local/bin/
-	BackendType string       // --type override; empty = auto-detect
+	DefaultDir  string // empty = ~/.local/bin/
+	BackendType string // --type override; empty = auto-detect
 	Pin         bool
 }
 

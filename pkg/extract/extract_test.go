@@ -87,9 +87,9 @@ func TestExtract(t *testing.T) {
 
 	// Shared fixture: a tar.gz with three files across two directories.
 	tarFiles := map[string][]byte{
-		"bin/tool":              []byte("tool binary"),
-		"bin/helper":           []byte("helper binary"),
-		"lib/support.so":       []byte("shared lib"),
+		"bin/tool":       []byte("tool binary"),
+		"bin/helper":     []byte("helper binary"),
+		"lib/support.so": []byte("shared lib"),
 	}
 
 	t.Run("tar_gz_empty_globs_returns_all", func(t *testing.T) {
