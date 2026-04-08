@@ -226,11 +226,11 @@ func (m *mgr) fetchAndParseSha256Sums(ctx context.Context, url, assetName string
 	if err != nil {
 		return nil, err
 	}
-	hex, ok := sums[assetName]
+	digest, ok := sums[assetName]
 	if !ok {
 		return nil, fmt.Errorf("asset %q not found in checksum file %q", assetName, url)
 	}
-	return map[string]string{"sha-256": hex}, nil
+	return map[string]string{"sha-256": digest}, nil
 }
 
 // resolveChecksumsPerAsset implements the "per-asset" strategy.
@@ -301,9 +301,9 @@ func (m *mgr) resolveChecksumsEmbedded(ctx context.Context, opts ChecksumOpts, a
 	if err != nil {
 		return nil, fmt.Errorf("embedded: parse checksum file: %w", err)
 	}
-	hex, ok := sums[assetName]
+	digest, ok := sums[assetName]
 	if !ok {
 		return nil, fmt.Errorf("embedded: asset %q not found in embedded checksum file", assetName)
 	}
-	return map[string]string{"sha-256": hex}, nil
+	return map[string]string{"sha-256": digest}, nil
 }
