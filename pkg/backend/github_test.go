@@ -2,377 +2,246 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 
-	"github.com/google/go-github/v55/github"
+	"github.com/ventifus/binmgr/pkg/manifest"
 )
 
-func TestExpandVariables(t *testing.T) {
-	tagName := "v1.2.3"
-	release := &github.RepositoryRelease{
-		TagName: &tagName,
+// fixtureRelease is a sample GitHub Releases API response.
+var fixtureRelease = githubRelease{
+	TagName: "v1.2.3",
+	Assets: []githubAsset{
+		{Name: "just-1.2.3-x86_64-unknown-linux-musl.tar.gz", BrowserDownloadURL: "https://github.com/casey/just/releases/download/v1.2.3/just-1.2.3-x86_64-unknown-linux-musl.tar.gz"},
+		{Name: "SHA256SUMS", BrowserDownloadURL: "https://github.com/casey/just/releases/download/v1.2.3/SHA256SUMS"},
+	},
+}
+
+// newTestServer creates a test HTTP server that serves a fixed release fixture.
+func newTestServer(t *testing.T, release githubRelease, statusCode int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		if statusCode == http.StatusOK {
+			if err := json.NewEncoder(w).Encode(release); err != nil {
+				t.Errorf("encoding fixture: %v", err)
+			}
+		}
+	}))
+}
+
+// rewriteTransport redirects all requests to a fixed base URL (test server).
+type rewriteTransport struct {
+	base string
+}
+
+func (rt *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	target, _ := url.Parse(rt.base)
+	req2 := req.Clone(req.Context())
+	req2.URL.Scheme = target.Scheme
+	req2.URL.Host = target.Host
+	return http.DefaultTransport.RoundTrip(req2)
+}
+
+// backendWithBaseURL returns a githubBackend that redirects API calls to baseURL.
+func backendWithBaseURL(token string, baseURL string) *githubBackend {
+	return &githubBackend{
+		token:      token,
+		httpClient: &http.Client{Transport: &rewriteTransport{base: baseURL}},
 	}
+}
+
+func TestCanHandle(t *testing.T) {
+	b := NewGitHubBackend().(*githubBackend)
 
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		rawURL string
+		want   bool
 	}{
-		{
-			name:  "replace TAG",
-			input: "file-${TAG}.tar.gz",
-			want:  "file-v1.2.3.tar.gz",
-		},
-		{
-			name:  "replace VERSION",
-			input: "file-${VERSION}.tar.gz",
-			want:  "file-1.2.3.tar.gz",
-		},
-		{
-			name:  "replace both",
-			input: "${TAG}-${VERSION}",
-			want:  "v1.2.3-1.2.3",
-		},
-		{
-			name:  "no variables",
-			input: "plain-text.tar.gz",
-			want:  "plain-text.tar.gz",
-		},
+		{"https://github.com/casey/just", true},
+		{"https://github.com/cli/cli", true},
+		{"https://gitlab.com/casey/just", false},
+		{"https://example.com/foo/bar", false},
+		{"https://dl.k8s.io/release/stable.txt", false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := expandVariables(release, tt.input)
-			if got != tt.want {
-				t.Errorf("expandVariables() = %s, want %s", got, tt.want)
-			}
-		})
+		u, err := url.Parse(tt.rawURL)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", tt.rawURL, err)
+		}
+		got := b.CanHandle(u)
+		if got != tt.want {
+			t.Errorf("CanHandle(%q) = %v, want %v", tt.rawURL, got, tt.want)
+		}
 	}
 }
 
-func TestInstallGithub_InvalidURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		url     string
-		wantErr bool
-		errMsg  string
-	}{
-		{
-			name:    "not github.com",
-			url:     "https://gitlab.com/owner/repo",
-			wantErr: true,
-			errMsg:  "only valid for github.com",
-		},
-		{
-			name:    "missing repo",
-			url:     "https://github.com/owner",
-			wantErr: true,
-			errMsg:  "invalid github URL format",
-		},
-		{
-			name:    "missing owner",
-			url:     "https://github.com/",
-			wantErr: true,
-			errMsg:  "invalid github URL format",
-		},
-		{
-			name:    "empty path",
-			url:     "https://github.com",
-			wantErr: true,
-			errMsg:  "invalid github URL format",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			u, err := url.Parse(tt.url)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			ctx := context.Background()
-			err = InstallGithub(ctx, u, "", "", ChecksumNone)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("InstallGithub() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if err != nil && tt.errMsg != "" && !containsMiddle(err.Error(), tt.errMsg) {
-				t.Errorf("Expected error containing %q, got %q", tt.errMsg, err.Error())
-			}
-		})
+func TestType(t *testing.T) {
+	b := NewGitHubBackend()
+	if got := b.Type(); got != "github" {
+		t.Errorf("Type() = %q, want %q", got, "github")
 	}
 }
 
-func TestNewGithubRepo(t *testing.T) {
-	repo := NewGithubRepo("testowner", "testrepo")
-	if repo == nil {
-		t.Fatal("NewGithubRepo returned nil")
+func TestResolveLatest(t *testing.T) {
+	srv := newTestServer(t, fixtureRelease, http.StatusOK)
+	defer srv.Close()
+
+	b := backendWithBaseURL("", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/just")
+
+	res, err := b.Resolve(context.Background(), u, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
 	}
-	if repo.owner != "testowner" {
-		t.Errorf("Expected owner 'testowner', got %s", repo.owner)
+	if res.Version != "v1.2.3" {
+		t.Errorf("Version = %q, want %q", res.Version, "v1.2.3")
 	}
-	if repo.repo != "testrepo" {
-		t.Errorf("Expected repo 'testrepo', got %s", repo.repo)
+	if len(res.Assets) != 2 {
+		t.Fatalf("len(Assets) = %d, want 2", len(res.Assets))
 	}
-	if repo.Manifest == nil {
-		t.Error("Manifest is nil")
+	if res.Assets[0].Name != "just-1.2.3-x86_64-unknown-linux-musl.tar.gz" {
+		t.Errorf("Assets[0].Name = %q", res.Assets[0].Name)
 	}
-	if repo.Manifest.Type != "github" {
-		t.Errorf("Expected type 'github', got %s", repo.Manifest.Type)
-	}
-	if repo.Manifest.Properties == nil {
-		t.Error("Properties map is nil")
-	}
-	if repo.Manifest.Properties["owner"] != "testowner" {
-		t.Error("Properties[owner] not set correctly")
-	}
-	if repo.Manifest.Properties["repo"] != "testrepo" {
-		t.Error("Properties[repo] not set correctly")
-	}
-	if repo.client == nil {
-		t.Error("Client is nil")
+	if res.Assets[0].Checksums != nil {
+		t.Errorf("Assets[0].Checksums should be nil for github backend")
 	}
 }
 
-func TestNewGithubRepoFromManifest(t *testing.T) {
-	manifest := NewBinmgrManifest()
-	manifest.Type = "github"
-	manifest.Properties["owner"] = "testowner"
-	manifest.Properties["repo"] = "testrepo"
+func TestResolveSpecificTag(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(fixtureRelease)
+	}))
+	defer srv.Close()
 
-	repo := NewGithubRepoFromManifest(manifest)
-	if repo == nil {
-		t.Fatal("NewGithubRepoFromManifest returned nil")
-	}
-	if repo.owner != "testowner" {
-		t.Errorf("Expected owner 'testowner', got %s", repo.owner)
-	}
-	if repo.repo != "testrepo" {
-		t.Errorf("Expected repo 'testrepo', got %s", repo.repo)
-	}
-	if repo.Manifest != manifest {
-		t.Error("Manifest reference not preserved")
-	}
-}
+	b := backendWithBaseURL("", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/just")
 
-func TestGetRelease_BoundsChecking(t *testing.T) {
-	// This test ensures our bounds checking fixes work
-	manifest := NewBinmgrManifest()
-	manifest.Properties["owner"] = "testowner"
-	manifest.Properties["repo"] = "testrepo"
-
-	repo := NewGithubRepoFromManifest(manifest)
-
-	tests := []struct {
-		name    string
-		urlPath []string
-		wantErr bool
-	}{
-		{
-			name:    "nil path - should get latest",
-			urlPath: nil,
-			wantErr: false, // Will fail due to API call, but shouldn't panic
-		},
-		{
-			name:    "empty path - should get latest",
-			urlPath: []string{},
-			wantErr: false,
-		},
-		{
-			name:    "short path - should get latest",
-			urlPath: []string{"", "owner", "repo"},
-			wantErr: false,
-		},
-		{
-			name:    "path with 4 elements but no 5th",
-			urlPath: []string{"", "owner", "repo", "releases"},
-			wantErr: false,
-		},
-		{
-			name:    "path with tag but no tag value - should get latest",
-			urlPath: []string{"", "owner", "repo", "releases", "tag"},
-			wantErr: false,
-		},
-		{
-			name:    "path with id but no id value - should get latest",
-			urlPath: []string{"", "owner", "repo", "releases", "id"},
-			wantErr: false,
-		},
-		{
-			name:    "valid tag path",
-			urlPath: []string{"", "owner", "repo", "releases", "tag", "v1.0.0"},
-			wantErr: false,
-		},
+	_, err := b.Resolve(context.Background(), u, ResolveOptions{Version: "v1.2.3"})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// We're testing that it doesn't panic, not that it succeeds
-			// (it will fail on API call, which is expected)
-			ctx := context.Background()
-			_ = repo.GetRelease(ctx, tt.urlPath)
-			// Not checking error because API call will fail in tests
-			// The important thing is that it doesn't panic on bounds checks
-		})
+	wantPath := "/repos/casey/just/releases/tags/v1.2.3"
+	if capturedPath != wantPath {
+		t.Errorf("API path = %q, want %q", capturedPath, wantPath)
 	}
 }
 
-func TestGetAssetByGlob(t *testing.T) {
-	assetName1 := "binary-linux-amd64.tar.gz"
-	assetName2 := "binary-darwin-amd64.tar.gz"
-	assetName3 := "binary-windows-amd64.zip"
+func TestResolveLatestEndpoint(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(fixtureRelease)
+	}))
+	defer srv.Close()
 
-	release := &github.RepositoryRelease{
-		Assets: []*github.ReleaseAsset{
-			{Name: &assetName1},
-			{Name: &assetName2},
-			{Name: &assetName3},
-		},
+	b := backendWithBaseURL("", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/just")
+
+	_, err := b.Resolve(context.Background(), u, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
 	}
-
-	tests := []struct {
-		name     string
-		glob     string
-		wantName string
-		wantErr  bool
-	}{
-		{
-			name:     "exact match",
-			glob:     "binary-linux-amd64.tar.gz",
-			wantName: "binary-linux-amd64.tar.gz",
-			wantErr:  false,
-		},
-		{
-			name:     "wildcard match",
-			glob:     "*linux*.tar.gz",
-			wantName: "binary-linux-amd64.tar.gz",
-			wantErr:  false,
-		},
-		{
-			name:     "pattern match",
-			glob:     "binary-*.zip",
-			wantName: "binary-windows-amd64.zip",
-			wantErr:  false,
-		},
-		{
-			name:    "no match",
-			glob:    "nonexistent-*.tar.gz",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			asset, err := getAssetByGlob(release, tt.glob)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getAssetByGlob() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr {
-				if asset == nil {
-					t.Error("Expected non-nil asset")
-					return
-				}
-				if asset.GetName() != tt.wantName {
-					t.Errorf("Expected asset name %s, got %s", tt.wantName, asset.GetName())
-				}
-			}
-		})
+	wantPath := "/repos/casey/just/releases/latest"
+	if capturedPath != wantPath {
+		t.Errorf("API path = %q, want %q", capturedPath, wantPath)
 	}
 }
 
-func TestGetChecksumFile(t *testing.T) {
-	sha256Name := "checksums.txt"
-	assetSha256Name := "binary-linux-amd64.tar.gz.sha256"
-	binaryName := "binary-linux-amd64.tar.gz"
+func TestCheck(t *testing.T) {
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(fixtureRelease)
+	}))
+	defer srv.Close()
 
-	tagName := "v1.0.0"
-	release := &github.RepositoryRelease{
-		TagName: &tagName,
-		Assets: []*github.ReleaseAsset{
-			{Name: &sha256Name},
-			{Name: &assetSha256Name},
-			{Name: &binaryName},
-		},
+	b := backendWithBaseURL("", srv.URL)
+	pkg := &manifest.Package{
+		SourceURL: "https://github.com/casey/just",
+		Version:   "v1.0.0",
 	}
 
-	binaryAsset := &github.ReleaseAsset{Name: &binaryName}
-
-	tests := []struct {
-		name         string
-		checksumType string
-		wantName     string
-		wantErr      bool
-	}{
-		{
-			name:         "sha256sums default",
-			checksumType: ChecksumShasum256,
-			wantName:     "", // Will match checksums.txt with glob
-			wantErr:      false,
-		},
-		{
-			name:         "per asset sha256",
-			checksumType: ChecksumPerAssetSha256,
-			wantName:     assetSha256Name,
-			wantErr:      false,
-		},
-		{
-			name:         "unsupported type",
-			checksumType: "unsupported",
-			wantErr:      true,
-		},
+	res, err := b.Check(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("Check returned error: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			asset, err := getChecksumFile(release, binaryAsset, tt.checksumType)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getChecksumFile() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr && asset != nil && tt.wantName != "" {
-				if asset.GetName() != tt.wantName {
-					t.Errorf("Expected checksum file %s, got %s", tt.wantName, asset.GetName())
-				}
-			}
-		})
+	if res.Version != "v1.2.3" {
+		t.Errorf("Version = %q, want %q", res.Version, "v1.2.3")
+	}
+	wantPath := "/repos/casey/just/releases/latest"
+	if capturedPath != wantPath {
+		t.Errorf("Check API path = %q, want %q", capturedPath, wantPath)
 	}
 }
 
-func TestNewArtifactFromAsset(t *testing.T) {
-	// This test verifies that artifact creation initializes properly
-	assetName := "binary.tar.gz"
-	assetURL := "https://api.github.com/repos/owner/repo/releases/assets/123"
-	browserURL := "https://github.com/owner/repo/releases/download/v1.0.0/binary.tar.gz"
+func TestAuthHeaderPresent(t *testing.T) {
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(fixtureRelease)
+	}))
+	defer srv.Close()
 
-	asset := &github.ReleaseAsset{
-		Name:               &assetName,
-		URL:                &assetURL,
-		BrowserDownloadURL: &browserURL,
+	b := backendWithBaseURL("my-secret-token", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/just")
+
+	_, err := b.Resolve(context.Background(), u, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
 	}
-
-	tagName := "v1.0.0"
-	release := &github.RepositoryRelease{
-		TagName: &tagName,
-		Assets:  []*github.ReleaseAsset{asset},
+	want := "Bearer my-secret-token"
+	if capturedAuth != want {
+		t.Errorf("Authorization header = %q, want %q", capturedAuth, want)
 	}
+}
 
-	repo := NewGithubRepo("owner", "repo")
+func TestAuthHeaderAbsent(t *testing.T) {
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(fixtureRelease)
+	}))
+	defer srv.Close()
 
-	// Test with ChecksumNone
-	artifact, err := repo.newArtifactFromAsset(release, asset, ChecksumNone)
+	b := backendWithBaseURL("", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/just")
+
+	_, err := b.Resolve(context.Background(), u, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if capturedAuth != "" {
+		t.Errorf("Authorization header present when no token: %q", capturedAuth)
+	}
+}
+
+func TestResolve404(t *testing.T) {
+	srv := newTestServer(t, githubRelease{}, http.StatusNotFound)
+	defer srv.Close()
+
+	b := backendWithBaseURL("", srv.URL)
+	u, _ := url.Parse("https://github.com/casey/nonexistent")
+
+	_, err := b.Resolve(context.Background(), u, ResolveOptions{})
 	if err == nil {
-		if artifact.RemoteFile != browserURL {
-			t.Errorf("Expected RemoteFile %s, got %s", browserURL, artifact.RemoteFile)
-		}
-		if artifact.AssetUrl != assetURL {
-			t.Errorf("Expected AssetUrl %s, got %s", assetURL, artifact.AssetUrl)
-		}
-		if artifact.ChecksumType != ChecksumNone {
-			t.Errorf("Expected ChecksumType %s, got %s", ChecksumNone, artifact.ChecksumType)
-		}
-		if artifact.Installed {
-			t.Error("Artifact should not be marked as installed")
-		}
+		t.Fatal("expected error for 404, got nil")
 	}
 }

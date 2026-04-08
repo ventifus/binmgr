@@ -2,481 +2,186 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/apex/log"
-	"github.com/go-errors/errors"
-	"github.com/google/go-github/v55/github"
-	"github.com/k0kubun/pp/v3"
+	"github.com/ventifus/binmgr/pkg/manifest"
 	"go.yaml.in/yaml/v3"
 )
 
-type GithubAsset struct {
-	Name      string
-	Version   string
-	Url       string
-	Checksums []string
+// githubBackend implements Backend for GitHub Releases.
+type githubBackend struct {
+	token      string
+	httpClient *http.Client // nil means use http.DefaultClient
 }
 
-type GithubRepo struct {
-	Manifest *BinmgrManifest
-	release  *github.RepositoryRelease
-	log      *log.Entry
-	client   *github.Client
-	owner    string
-	repo     string
-}
-
-type GhConfig struct {
-	Hosts map[string]GhHostConfig `yaml:",inline"`
-}
-
-type GhHostConfig struct {
-	User        string                  `yaml:"user"`
-	OauthToken  string                  `yaml:"oauth_token"`
-	GitProtocol string                  `yaml:"git_protocol"`
-	Users       map[string]GhUserConfig `yaml:"users"`
-}
-
-type GhUserConfig struct {
+// ghHostConfig holds per-host config from ~/.config/gh/hosts.yml.
+type ghHostConfig struct {
 	OauthToken string `yaml:"oauth_token"`
 }
 
-func expandVariables(release *github.RepositoryRelease, s string) string {
-	tag := release.GetTagName()
-	version := strings.TrimPrefix(tag, "v")
-	s = strings.ReplaceAll(s, "${TAG}", tag)
-	s = strings.ReplaceAll(s, "${VERSION}", version)
-	return s
+// ghConfig is the top-level gh CLI config file (hosts are inline keys).
+type ghConfig struct {
+	Hosts map[string]ghHostConfig `yaml:",inline"`
 }
 
-func getGithubClientFromGhConfig(f *os.File) (*github.Client, error) {
-	ghConfig, err := parseGhConfig(f)
+// loadGHToken reads the GitHub OAuth token from the gh CLI config file.
+// Returns an empty string (and logs a warning) if unavailable.
+func loadGHToken() string {
+	p := path.Join(os.Getenv("HOME"), ".config/gh/hosts.yml")
+	f, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		log.WithError(err).Warn("could not open gh config; using unauthenticated GitHub access")
+		return ""
 	}
-	hostConfig, ok := ghConfig.Hosts["github.com"]
-	if !ok {
-		pp.Println(ghConfig)
-		return nil, errors.Errorf("no github.com host found in gh config")
+	defer f.Close()
+
+	var cfg ghConfig
+	dec := yaml.NewDecoder(f)
+	if err := dec.Decode(&cfg); err != nil {
+		log.WithError(err).Warn("could not parse gh config; using unauthenticated GitHub access")
+		return ""
 	}
-	token := hostConfig.OauthToken
-	if token == "" {
-		return nil, errors.Errorf("no oauth_token found in gh config for github.com")
+
+	host, ok := cfg.Hosts["github.com"]
+	if !ok || host.OauthToken == "" {
+		log.Warn("no oauth_token for github.com in gh config; using unauthenticated GitHub access")
+		return ""
 	}
-	ts := github.BasicAuthTransport{
-		Username: "oauth2",
-		Password: token,
-	}
-	client := github.NewClient(ts.Client())
-	return client, nil
+	return host.OauthToken
 }
 
-func parseGhConfig(f *os.File) (*GhConfig, error) {
-	ghConfig := &GhConfig{}
-	stat, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	data := make([]byte, stat.Size())
-	_, err = f.Read(data)
-	if err != nil {
-		return nil, err
-	}
-	err = yaml.Unmarshal(data, ghConfig)
-	if err != nil {
-		return nil, err
-	}
-	return ghConfig, nil
+// NewGitHubBackend creates a new GitHub backend, loading auth token from gh CLI config if available.
+func NewGitHubBackend() Backend {
+	return &githubBackend{token: loadGHToken()}
 }
 
-func newGithubClient() *github.Client {
-	// load oauth token from ~/.config/gh/hosts.yml if available
-	ctx := context.Background()
-	var client *github.Client
-	f, err := os.Open(path.Join(os.Getenv("HOME"), ".config/gh/hosts.yml"))
+// CanHandle returns true when the URL host is github.com.
+func (g *githubBackend) CanHandle(u *url.URL) bool {
+	return u.Host == "github.com"
+}
+
+// Type returns the backend type string.
+func (g *githubBackend) Type() string {
+	return "github"
+}
+
+// githubRelease is a minimal representation of the GitHub Releases API response.
+type githubRelease struct {
+	TagName string         `json:"tag_name"`
+	Assets  []githubAsset  `json:"assets"`
+}
+
+type githubAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+// client returns the HTTP client to use, falling back to http.DefaultClient.
+func (g *githubBackend) client() *http.Client {
+	if g.httpClient != nil {
+		return g.httpClient
+	}
+	return http.DefaultClient
+}
+
+// doRequest performs an authenticated (if token available) GET request to the GitHub API.
+func (g *githubBackend) doRequest(ctx context.Context, apiURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		log.WithError(err).Warn("could not open gh config file; using unauthenticated github client")
-		client = github.NewClient(nil)
+		return nil, fmt.Errorf("creating request for %s: %w", apiURL, err)
+	}
+	req.Header.Set("User-Agent", "binmgr")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if g.token != "" {
+		req.Header.Set("Authorization", "Bearer "+g.token)
+	}
+	return g.client().Do(req)
+}
+
+// ownerRepo extracts the owner and repo from a GitHub URL path (e.g. /casey/just).
+func ownerRepo(sourceURL *url.URL) (owner, repo string, err error) {
+	parts := strings.SplitN(strings.TrimPrefix(sourceURL.Path, "/"), "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid GitHub URL %q: expected /owner/repo path", sourceURL)
+	}
+	return parts[0], parts[1], nil
+}
+
+// resolveRelease resolves a GitHub release and returns a Resolution.
+func (g *githubBackend) resolveRelease(ctx context.Context, owner, repo, version string) (*Resolution, error) {
+	var apiURL string
+	if version != "" {
+		apiURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, version)
 	} else {
-		client, err = getGithubClientFromGhConfig(f)
-		f.Close()
-		if err != nil {
-			log.WithError(err).Error("failed to create github client from gh config")
-		}
-	}
-	if client == nil {
-		log.Debug("Using anonymous github access")
-		client = github.NewClient(nil)
+		apiURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	}
 
-	u, _, err := client.Users.Get(ctx, "")
-	if u != nil {
-		log.Debugf("using github user: %s", u.GetLogin())
-	}
+	log.WithField("url", apiURL).Debug("resolving GitHub release")
 
-	rl, _, err := client.RateLimits(ctx)
-	if err == nil {
-		log.WithField("rate", rl.Core.Remaining).WithField("reset", rl.Core.Reset.Time).Debug("github rate limit")
-	} else {
-		log.WithError(err).Error("failed to get github rate limit")
-	}
-	client.APIMeta(ctx)
-	return client
-}
-
-func InstallGithub(ctx context.Context, githubUrl *url.URL, fileGlob string, outFile string, checksumType string) error {
-	if githubUrl.Host != "github.com" {
-		return fmt.Errorf("this type is only valid for github.com")
-	}
-	log := log.WithField("url", githubUrl.String())
-
-	githubPath := strings.Split(githubUrl.Path, "/")
-	if len(githubPath) < 3 {
-		return fmt.Errorf("invalid github URL format: expected github.com/owner/repo")
-	}
-	owner := githubPath[1]
-	repo := githubPath[2]
-
-	if outFile == "" {
-		outFile = path.Join(os.Getenv("HOME"), ".local/bin") + "/"
-		log.Debugf("outFile not specified, setting to %s", outFile)
-	}
-	if !path.IsAbs(outFile) {
-		outFile = path.Join(os.Getenv("HOME"), ".local/bin/", outFile)
-		log.Debugf("outFile set to path %s", outFile)
-	}
-	log.WithField("outFile", outFile).Debug("outfile")
-
-	gh := NewGithubRepo(owner, repo)
-	err := gh.GetRelease(ctx, githubPath)
+	resp, err := g.doRequest(ctx, apiURL)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("github request to %s: %w", apiURL, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// handled below
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("github.com/%s/%s: release not found (404)", owner, repo)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, fmt.Errorf("github.com/%s/%s: authentication error (%d)", owner, repo, resp.StatusCode)
+	case http.StatusTooManyRequests:
+		return nil, fmt.Errorf("github.com/%s/%s: rate limited (429)", owner, repo)
+	default:
+		return nil, fmt.Errorf("github.com/%s/%s: unexpected status %d", owner, repo, resp.StatusCode)
 	}
 
-	fileGlob = expandVariables(gh.release, fileGlob)
-	globs := strings.Split(fileGlob, "!")
+	var rel githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return nil, fmt.Errorf("decoding GitHub release response: %w", err)
+	}
 
-	asset, err := getAssetByGlob(gh.release, globs[0])
+	assets := make([]Asset, 0, len(rel.Assets))
+	for _, a := range rel.Assets {
+		assets = append(assets, Asset{
+			Name: a.Name,
+			URL:  a.BrowserDownloadURL,
+			// Checksums intentionally empty; located via separate checksum files.
+		})
+	}
+
+	return &Resolution{
+		Version: rel.TagName,
+		Assets:  assets,
+	}, nil
+}
+
+// Resolve resolves a specific or latest GitHub release for the given URL.
+func (g *githubBackend) Resolve(ctx context.Context, sourceURL *url.URL, opts ResolveOptions) (*Resolution, error) {
+	owner, repo, err := ownerRepo(sourceURL)
 	if err != nil {
-		return err
-	}
-	artifact, err := gh.newArtifactFromAsset(gh.release, asset, checksumType)
-	if err != nil {
-		return err
-	}
-	artifact.FromGlob = globs[0]
-	gh.Manifest.Artifacts = append(gh.Manifest.Artifacts, artifact)
-
-	for _, artifact := range gh.Manifest.Artifacts {
-		err = VerifyLocalFile(artifact)
-		if err == nil {
-			log.Info("local file exists and matches checksum; nothing to do")
-			continue
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-
-		f, err := DownloadFile(ctx, nil, artifact)
-		if err != nil {
-			log.WithError(err).Error("failed to read response data")
-			return err
-		}
-
-		fmt.Printf("Installing from %s\n", artifact.RemoteFile)
-
-		err = InstallFile(artifact, f, outFile, strings.Join(globs[1:], "!"))
-		if err != nil {
-			return err
-		}
-	}
-	return gh.Manifest.SaveManifest()
-}
-
-func UpdateGithub(ctx context.Context, m *BinmgrManifest) error {
-	log := log.WithField("manifest", m.Name)
-	currentVersion := m.CurrentVersion
-	fmt.Printf("Package %s %s\n", m.Name, currentVersion)
-	repo := NewGithubRepoFromManifest(m)
-	err := repo.GetRelease(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if currentVersion == repo.Manifest.CurrentVersion {
-		log.WithField("version", repo.Manifest.CurrentVersion).Debug("no update found")
-		fmt.Println("  no update needed")
-		return nil
-	}
-	fmt.Printf("  upgrade %s -> %s\n", currentVersion, repo.Manifest.CurrentVersion)
-	log.WithField("manifest", repo.Manifest.String()).Info("received manifest")
-	updates := false
-	for i, artifact := range repo.Manifest.Artifacts {
-		if artifact.ChecksumType == "" {
-			artifact.ChecksumType = ChecksumShasum256
-		}
-		log.WithField("artifact", artifact).Debug("processing artifact")
-		newArtifact, err := repo.UpdateArtifact(artifact)
-		if err != nil {
-			log.WithError(err).Error("failed to update artifact")
-			continue
-		}
-		newArtifact.LocalFile = artifact.LocalFile
-		newArtifact.InnerArtifacts = artifact.InnerArtifacts
-		newArtifact.Installed = artifact.Installed
-		if newArtifact.RemoteFile == artifact.RemoteFile {
-			log.Debug("no update needed")
-			continue
-		}
-		repo.Manifest.Artifacts[i] = newArtifact
-
-		f, err := DownloadFile(ctx, nil, newArtifact)
-		if err != nil {
-			log.WithError(err).Error("failed to read response data")
-			return err
-		}
-
-		if newArtifact.Installed {
-			err = InstallFile(newArtifact, f, newArtifact.LocalFile, newArtifact.FromGlob)
-			if err != nil {
-				return err
-			}
-			updates = true
-		} else {
-			for _, ia := range newArtifact.InnerArtifacts {
-				if ia.Installed {
-					globs := expandVariables(repo.release, ia.FromGlob)
-					err = InstallFile(newArtifact, f, ia.LocalFile, globs)
-					if err != nil {
-						return err
-					}
-					updates = true
-				}
-			}
-		}
-	}
-	if updates {
-		return repo.Manifest.SaveManifest()
-	}
-	return nil
-}
-
-func GithubStatus(ctx context.Context, m *BinmgrManifest) error {
-	log := log.WithField("manifest", m.Name)
-	currentVersion := m.CurrentVersion
-	fmt.Printf("Package %s %s\n", m.Name, currentVersion)
-	repo := NewGithubRepoFromManifest(m)
-	err := repo.GetRelease(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if currentVersion == repo.Manifest.CurrentVersion {
-		log.WithField("version", repo.Manifest.CurrentVersion).Debug("no update found")
-		fmt.Println("  no update needed")
-		return nil
-	}
-	fmt.Printf("  upgrade %s -> %s\n", currentVersion, repo.Manifest.CurrentVersion)
-	return nil
-}
-
-func getChecksumFile(release *github.RepositoryRelease, asset *github.ReleaseAsset, checksumType string) (*github.ReleaseAsset, error) {
-	checksumTypes := strings.Split(checksumType, "!")
-	checksumGlob := ""
-	if len(checksumTypes) > 1 {
-		checksumGlob = checksumTypes[1]
-	}
-	if checksumTypes[0] == ChecksumShasum256 {
-		if checksumGlob == "" {
-			checksumGlob = "sha256sum"
-		}
-	} else if strings.HasPrefix(checksumTypes[0], "per_asset:") {
-		if checksumGlob == "" {
-			checksumGlob = asset.GetName() + "." + strings.TrimPrefix(checksumType, "per_asset:")
-		}
-	} else {
-		return nil, errors.Errorf("unsupported checksum type %s for github module", checksumType)
-	}
-	checksumGlob = expandVariables(release, checksumGlob)
-	log.WithFields(log.Fields{
-		"asset": asset.GetName(),
-		"type":  checksumTypes[0],
-		"glob":  checksumGlob,
-	}).Debug("looking for matching checksum file")
-	asset, err := getAssetByGlob(release, checksumGlob)
-	return asset, err
-}
-
-func NewGithubRepo(owner string, repo string) *GithubRepo {
-
-	m := NewBinmgrManifest()
-	m.Type = "github"
-	m.Properties = map[string]string{
-		"owner": owner,
-		"repo":  repo,
-	}
-	r := GithubRepo{
-		Manifest: m,
-		log:      log.WithField("owner", owner).WithField("repo", repo),
-		client:   newGithubClient(),
-		owner:    owner,
-		repo:     repo,
-	}
-	return &r
-}
-
-func NewGithubRepoFromManifest(manifest *BinmgrManifest) *GithubRepo {
-	owner := manifest.Properties["owner"]
-	repo := manifest.Properties["repo"]
-	r := GithubRepo{
-		Manifest: manifest,
-		log:      log.WithField("owner", owner).WithField("repo", repo),
-		client:   newGithubClient(),
-		owner:    owner,
-		repo:     repo,
-	}
-	return &r
-}
-
-func (g *GithubRepo) GetRelease(ctx context.Context, u []string) error {
-	log := g.log.WithField("manifest", g.Manifest.Name).WithField("url", u)
-	var release *github.RepositoryRelease
-	var resp *github.Response
-	var err error
-	if len(u) < 4 {
-		log.WithField("release", "latest").Debug("getting latest release")
-		release, resp, err = g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
-	} else if len(u) >= 6 && u[4] == "tag" {
-		log.WithField("release", u[5]).Debug("getting release tag")
-		release, resp, err = g.client.Repositories.GetReleaseByTag(ctx, g.owner, g.repo, u[5])
-	} else if len(u) >= 6 && u[4] == "id" {
-		var rel int64
-		rel, err = strconv.ParseInt(u[5], 10, 64)
-		if err != nil {
-			return err
-		}
-		log.WithField("release", rel).Debug("getting release id")
-		release, resp, err = g.client.Repositories.GetRelease(ctx, g.owner, g.repo, rel)
-	} else if len(u) >= 5 {
-		log.WithField("u[3]", u[4]).Error("unsupported release type")
-	} else {
-		log.WithField("release", "latest").Debug("getting latest release (fallback)")
-		release, resp, err = g.client.Repositories.GetLatestRelease(ctx, g.owner, g.repo)
-	}
-	if err != nil {
-		return err
-	} else if resp.StatusCode != 200 {
-		log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Error("failed to get github release")
-		return errors.Errorf("github.com/%s/%s: %s", g.owner, g.repo, resp.Status)
-	}
-	log.WithField("status", resp.Status).WithField("statuscode", resp.StatusCode).Debug("get github release")
-	g.release = release
-	g.Manifest.Name = fmt.Sprintf("github.com/%s/%s", g.owner, g.repo)
-	g.Manifest.ManifestFileName = fmt.Sprintf("github.com_%s_%s", g.owner, g.repo)
-	g.Manifest.CurrentRemoteUrl = release.GetURL()
-	g.Manifest.CurrentVersion = release.GetTagName()
-	g.Manifest.LatestRemoteUrl = fmt.Sprintf("https://github.com/%s/%s", g.owner, g.repo)
-	g.Manifest.Properties["owner"] = g.owner
-	g.Manifest.Properties["repo"] = g.repo
-	return nil
-}
-
-func (g *GithubRepo) newArtifactFromAsset(release *github.RepositoryRelease, asset *github.ReleaseAsset, checksumType string) (*Artifact, error) {
-	checksums := make(map[string]string, 0)
-	checksumTypes := strings.Split(checksumType, "!")
-	checksumUrl := ""
-	switch checksumTypes[0] {
-	case ChecksumShasum256:
-		checksumGlob := "sha256sum"
-		if len(checksumTypes) > 1 && checksumTypes[1] != "" {
-			checksumGlob = checksumTypes[1]
-			checksumGlob = expandVariables(release, checksumGlob)
-		}
-		checksumFile, err := getAssetByGlob(release, checksumGlob)
-		if err != nil {
-			log.WithError(err).Error("failed to retrieve checksum file")
-			return nil, err
-		}
-		checksumUrl = checksumFile.GetBrowserDownloadURL()
-		log.WithField("file", checksumFile).WithField("url", checksumUrl).Debug("got checksum file")
-		checksum, err := GetSumForFile(nil, checksumUrl, asset.GetName())
-		if err != nil {
-			return nil, err
-		}
-		checksums[ChecksumShasum256] = checksum
-	case ChecksumMultiSum:
-		checksumGlob := "checksums"
-		if len(checksumTypes) > 1 && checksumTypes[1] != "" {
-			checksumGlob = checksumTypes[1]
-		}
-		mapGlob := "checksums_hashes_order"
-		if len(checksumTypes) > 2 && checksumTypes[2] != "" {
-			mapGlob = checksumTypes[2]
-		}
-		checksumFile, err := getAssetByGlob(release, checksumGlob)
-		if err != nil {
-			return nil, err
-		}
-		mapFile, err := getAssetByGlob(release, mapGlob)
-		if err != nil {
-			return nil, err
-		}
-		checksumUrl = checksumFile.GetBrowserDownloadURL()
-		csumMap, err := GetChecksumMap(nil, mapFile.GetBrowserDownloadURL())
-		if err != nil {
-			return nil, err
-		}
-		log.WithField("map", csumMap).Debug("retrieved checksum map")
-		checksums, err = GetMultiSumForFile(nil, csumMap, checksumUrl, asset.GetName())
-		if err != nil {
-			return nil, err
-		}
-	}
-	log.WithField("checksums", checksums).Debug("retrieved checksums")
-
-	artifact := NewArtifact()
-	artifact.AssetUrl = *asset.URL
-	artifact.RemoteFile = asset.GetBrowserDownloadURL()
-	artifact.ChecksumType = checksumType
-	artifact.ChecksumFile = checksumUrl
-	artifact.Checksums = checksums
-	artifact.Installed = false
-	return artifact, nil
-}
-
-func (g *GithubRepo) UpdateArtifact(a *Artifact) (*Artifact, error) {
-	asset, err := getAssetByGlob(g.release, a.FromGlob)
-	if err != nil {
-		log.WithError(err).Error("failed to find asset by glob")
 		return nil, err
 	}
-	artifact, err := g.newArtifactFromAsset(g.release, asset, a.ChecksumType)
-	if err != nil {
-		log.WithError(err).Error("failed to create new artifact from asset")
-		return nil, err
-	}
-	artifact.FromGlob = a.FromGlob
-	return artifact, err
+	return g.resolveRelease(ctx, owner, repo, opts.Version)
 }
 
-func getAssetByGlob(release *github.RepositoryRelease, nameGlob string) (*github.ReleaseAsset, error) {
-	for _, asset := range release.Assets {
-		t, err := filepath.Match(nameGlob, asset.GetName())
-		log.WithFields(log.Fields{
-			"glob":  nameGlob,
-			"match": t,
-			"asset": asset.GetName(),
-		}).Debug("asset")
-		if err != nil {
-			return nil, err
-		}
-		if t {
-			return asset, nil
-		}
+// Check returns the latest release resolution, which the manager compares to pkg.Version.
+func (g *githubBackend) Check(ctx context.Context, pkg *manifest.Package) (*Resolution, error) {
+	u, err := url.Parse(pkg.SourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing source URL %q: %w", pkg.SourceURL, err)
 	}
-	return nil, errors.Errorf("no asset found matching %s", nameGlob)
+	owner, repo, err := ownerRepo(u)
+	if err != nil {
+		return nil, err
+	}
+	return g.resolveRelease(ctx, owner, repo, "")
 }
